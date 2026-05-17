@@ -1,0 +1,16 @@
+# .cargo/config.toml
+#
+# This file configures Cargo's build behaviour at the workspace level.
+# The [build] section sets the default target for the *eBPF crate only*.
+# User-space crates are compiled normally for the host target; they override
+# this in their own Cargo.toml or via the xtask runner.
+
+[target.bpfel-unknown-none]
+# bpf-linker is a drop-in replacement for the LLVM linker that produces
+# valid BPF ELF objects. It must be installed separately:
+#   cargo install bpf-linker
+linker = "bpf-linker"
+rustflags = ["-C", "link-arg=--btf"]
+
+[alias]
+xtask = "run --package xtask --"

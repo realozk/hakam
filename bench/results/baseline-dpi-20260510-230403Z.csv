@@ -1,0 +1,14 @@
+metric,value,unit
+label,baseline-dpi,
+workload,dpi,
+ts_utc,20260510-230403Z,
+duration,60.320,s
+host_iface,phbench0,
+phantom_listening,0,bool
+host_cpu_pct,0.19,%
+rx_pkts,1122,pkts
+tx_pkts,1124,pkts
+rx_pps,18.60,pps
+tx_pps,18.63,pps
+rx_bps,1257,bps
+ws_samples,0,n

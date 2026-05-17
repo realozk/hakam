@@ -1,0 +1,14 @@
+[package]
+name    = "xtask"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+# anyhow for ergonomic error handling in the build runner.
+anyhow = "1"
+# clap for sub-command parsing (build-ebpf, run, etc.)
+clap   = { version = "4", features = ["derive"] }

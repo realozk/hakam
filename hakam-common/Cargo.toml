@@ -1,0 +1,16 @@
+[package]
+name    = "hakam-common"
+version = "0.1.0"
+edition = "2021"
+
+# This crate is shared between user-space (std) and kernel-space (no_std).
+# Keeping it no_std ensures it can be imported by hakam-ebpf without
+# pulling in the standard library, which is unavailable in BPF context.
+[features]
+default = ["std"]
+std     = []
+
+[dependencies]
+# Pod (Plain Old Data) derive is needed so aya can safely copy these
+# structs byte-for-byte into eBPF maps. In no_std mode we rely on
+# aya-ebpf-bindings for Pod; in std mode we use aya's user-space Pod.

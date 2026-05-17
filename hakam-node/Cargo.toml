@@ -1,0 +1,28 @@
+[package]
+name    = "hakam-node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya          = { version = "0.13", features = ["async_tokio"], optional = true }
+aya-log      = { version = "0.2", optional = true }
+tokio        = { version = "1", features = ["full"], optional = true }
+clap         = { version = "4", features = ["derive", "env"], optional = true }
+log          = { version = "0.4", optional = true }
+warp         = { version = "0.3", optional = true }
+serde        = { version = "1", features = ["derive"], optional = true }
+serde_json   = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+libc         = { version = "0.2", optional = true }
+
+anyhow         = "1"
+env_logger     = "0.11"
+colored        = "2"
+hakam-common = { path = "../hakam-common" }
+
+[features]
+linux = [
+    "aya", "aya-log", "tokio", "clap", "log",
+    "warp", "serde", "serde_json", "futures-util", "libc",
+]
+default = []

@@ -1,0 +1,12 @@
+# This file pins the nightly toolchain for the entire workspace.
+# The eBPF crate (hakam-ebpf) requires nightly + rust-src to compile
+# to the bpfel-unknown-none target. User-space crates also benefit from
+# nightly features like better diagnostics.
+[toolchain]
+channel    = "nightly"
+# rust-src is required so that `cargo build -Z build-std=core` can compile
+# `core` from source for bpfel-unknown-none (a Tier-3 target with no prebuilt std).
+# Do NOT add bpfel-unknown-none to `targets` — rustup will try to download a
+# prebuilt rust-std for it, which does not exist, and fail with the error:
+#   "component 'rust-std' for target 'bpfel-unknown-none' is unavailable"
+components = ["rust-src", "rustfmt", "clippy"]

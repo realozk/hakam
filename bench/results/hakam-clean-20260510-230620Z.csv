@@ -1,0 +1,14 @@
+metric,value,unit
+label,phantom-clean,
+workload,clean,
+ts_utc,20260510-230620Z,
+duration,60.300,s
+host_iface,phbench0,
+phantom_listening,1,bool
+host_cpu_pct,0.14,%
+rx_pkts,1626,pkts
+tx_pkts,504,pkts
+rx_pps,26.97,pps
+tx_pps,8.36,pps
+rx_bps,1616,bps
+ws_samples,0,n

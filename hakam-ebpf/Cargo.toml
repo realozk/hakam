@@ -1,0 +1,19 @@
+[package]
+name    = "hakam-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name  = "hakam-ebpf"
+path   = "src/main.rs"
+
+[dependencies]
+# aya-ebpf provides the BPF-side macros (#[xdp], #[map]), map types
+# (HashMap), and the XdpContext helper struct.
+aya-ebpf = "0.1"
+
+network-types = "0.0.7"
+
+# Our shared struct definitions (IP types, etc.) compiled in no_std mode.
+hakam-common = { path = "../hakam-common", default-features = false }
+

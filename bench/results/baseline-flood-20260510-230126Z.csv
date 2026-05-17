@@ -1,0 +1,14 @@
+metric,value,unit
+label,baseline-flood,
+workload,flood,
+ts_utc,20260510-230126Z,
+duration,60.283,s
+host_iface,phbench0,
+phantom_listening,0,bool
+host_cpu_pct,4.65,%
+rx_pkts,9018505,pkts
+tx_pkts,68,pkts
+rx_pps,149602.79,pps
+tx_pps,1.13,pps
+rx_bps,15707517,bps
+ws_samples,0,n

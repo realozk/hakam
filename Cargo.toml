@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "hakam-common",
+    "hakam-ebpf",
+    "hakam-node",
+    "xtask",
+]
+exclude = [
+    "hakam-ui/src-tauri"
+]
+# Exclude hakam-ebpf from the default build profile so that
+# `cargo build` in the root doesn't try to compile it for the host target.
+# It is compiled separately via `cargo xtask build-ebpf`.
+default-members = [
+    "hakam-common",
+    "hakam-node",
+    "xtask",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+debug = false
+panic = "abort"
+
+[profile.dev]
+opt-level = 3
+lto = true
+debug = false
+panic = "abort"
