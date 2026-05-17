@@ -1,30 +1,23 @@
-# ── Build outputs ──────────────────────────────────────────────────────
 /target/
 hakam-ui/src-tauri/target/
 hakam-ui/dist/
 *.tsbuildinfo
 
-# ── Dependencies ───────────────────────────────────────────────────────
 node_modules/
 
-# ── Editor / IDE ───────────────────────────────────────────────────────
 /.idea/
 /.vscode/
 *.swp
 *.swo
 
-# ── OS metadata ────────────────────────────────────────────────────────
 **/.DS_Store
 **/._*
 
-# ── Secrets / local config ─────────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 
-# ── Runtime logs ───────────────────────────────────────────────────────
 *.log
 
-# ── Tooling artifacts ──────────────────────────────────────────────────
 repomix-output.txt
 .claude/
