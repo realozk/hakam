@@ -15,9 +15,11 @@ serde_json   = { version = "1", optional = true }
 futures-util = { version = "0.3", optional = true }
 libc         = { version = "0.2", optional = true }
 
-anyhow         = "1"
-env_logger     = "0.11"
-colored        = "2"
+anyhow            = "1"
+env_logger        = "0.11"
+colored           = "2"
+aho-corasick      = "1"
+percent-encoding  = "2"
 hakam-common = { path = "../hakam-common" }
 
 [features]

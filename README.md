@@ -97,10 +97,10 @@ Pre-stage health check: `./scripts/preflight.sh`
 
 Hakam is a signature-based inline DPI engine — not a WAF. Here's what it can't do:
 
-- **No URL decoding** — `UNION%20SELECT` (space encoded) will slip past SQLi signatures. The exception is common LFI path-traversal encodings (`..%2F`, `%2E%2E%2F`, `%252E%252E`), which are explicit signatures.
-- **64-byte capture window** — anything that starts after the first 64 bytes of a TCP segment (long path prefix, POST body) is invisible to the engine.
-- **Single-segment only** — a multi-packet attack split across TCP segment boundaries evades all signatures.
-- **ASCII uppercase only** — Unicode homoglyphs and fullwidth characters aren't normalized.
+- **64-byte capture window per segment** — the eBPF sample is 64 bytes. Reassembly stitches segments together up to 256 bytes per flow, but bytes past that cap on a long flow are still invisible.
+- **In-order TCP only** — userspace reassembly appends segments in arrival order. Out-of-order delivery (rare on a healthy LAN, common over the wider internet) can break a split signature. The Phase 2 eBPF conntrack will fix this by exposing sequence numbers.
+- **ASCII case folding only** — the Aho-Corasick automaton folds A–Z ⇔ a–z, but Unicode homoglyphs and fullwidth characters are not normalised.
+- **Single-pass URL decoding** — `%XX` and `+` are decoded once as a fallback (so `UNION%20SELECT` and `UNION+SELECT` both match). Double-encoded payloads like `UNION%2520SELECT` are not recursively decoded.
 
 Full evasion corpus (30 mutations, hit/miss table): [`docs/evasion.md`](docs/evasion.md)
 

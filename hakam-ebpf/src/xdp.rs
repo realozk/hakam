@@ -37,6 +37,7 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
 
     let ipv4: *const Ipv4Hdr = unsafe { ptr_at(ctx, EthHdr::LEN)? };
     let src_addr: u32 = unsafe { (*ipv4).src_addr };
+    let dst_addr: u32 = unsafe { (*ipv4).dst_addr };
 
     if BLOCKLIST.get(&Key::new(32u32, src_addr)).is_some() {
         increment_drop_counter();
@@ -77,14 +78,14 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     if unsafe { (*ipv4).proto } == IpProto::Tcp {
-        sample_payload(ctx, src_addr);
+        sample_payload(ctx, src_addr, dst_addr);
     }
 
     Ok(xdp_action::XDP_PASS)
 }
 
 #[inline(always)]
-fn sample_payload(ctx: &XdpContext, src_addr: u32) {
+fn sample_payload(ctx: &XdpContext, src_addr: u32, dst_addr: u32) {
     let data = ctx.data();
     let data_end = ctx.data_end();
 
@@ -97,16 +98,21 @@ fn sample_payload(ctx: &XdpContext, src_addr: u32) {
         return;
     }
 
-    let doff_addr = data + EthHdr::LEN + ip_hdr_len + 12;
-    if doff_addr + 1 > data_end {
+    let tcp_hdr_start = data + EthHdr::LEN + ip_hdr_len;
+    // Need the first 13 bytes of the TCP header: ports (0..4) and data offset (12..13).
+    if tcp_hdr_start + 13 > data_end {
         return;
     }
-    let tcp_hdr_len = (unsafe { *(doff_addr as *const u8) } >> 4) as usize * 4;
+
+    let src_port: u16 = unsafe { *(tcp_hdr_start as *const u16) };
+    let dst_port: u16 = unsafe { *((tcp_hdr_start + 2) as *const u16) };
+
+    let tcp_hdr_len = (unsafe { *((tcp_hdr_start + 12) as *const u8) } >> 4) as usize * 4;
     if tcp_hdr_len < 20 || tcp_hdr_len > 60 {
         return;
     }
 
-    let payload_start = data + EthHdr::LEN + ip_hdr_len + tcp_hdr_len;
+    let payload_start = tcp_hdr_start + tcp_hdr_len;
     if payload_start + PAYLOAD_LEN > data_end {
         return;
     }
@@ -126,6 +132,9 @@ fn sample_payload(ctx: &XdpContext, src_addr: u32) {
     let ptr = entry.as_mut_ptr();
     unsafe {
         (*ptr).src_addr = src_addr;
+        (*ptr).dst_addr = dst_addr;
+        (*ptr).src_port = src_port;
+        (*ptr).dst_port = dst_port;
         (*ptr).payload_len = PAYLOAD_LEN as u32;
         core::ptr::copy_nonoverlapping(
             payload_start as *const u8,

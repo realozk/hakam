@@ -13,8 +13,6 @@ mod maintenance;
 #[cfg(feature = "linux")]
 mod metrics;
 #[cfg(feature = "linux")]
-mod signatures;
-#[cfg(feature = "linux")]
 mod telemetry;
 
 #[cfg(feature = "linux")]

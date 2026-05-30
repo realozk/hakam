@@ -3,10 +3,20 @@
 pub const PAYLOAD_LEN: usize = 64;
 
 /// Sent from the XDP ring buffer to userspace for every sampled TCP payload.
+///
+/// `src_addr` / `dst_addr` are big-endian (network byte order, copied straight
+/// from the IPv4 header). `src_port` / `dst_port` are also big-endian
+/// (copied from the TCP header). Userspace converts on display.
+///
+/// The 4-tuple is required for per-flow TCP reassembly — userspace keys its
+/// buffer on `(src_addr, src_port, dst_addr, dst_port)`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PayloadEvent {
     pub src_addr:    u32,
+    pub dst_addr:    u32,
+    pub src_port:    u16,
+    pub dst_port:    u16,
     pub payload_len: u32,
     pub payload:     [u8; PAYLOAD_LEN],
 }
@@ -145,6 +155,15 @@ mod tests {
             use super::super::ConnectEvent;
             assert_eq!(core::mem::size_of::<ConnectEvent>(), 28);
             assert_eq!(core::mem::align_of::<ConnectEvent>(), 4);
+        }
+
+        #[test]
+        fn test_payload_event_layout() {
+            use super::super::{PayloadEvent, PAYLOAD_LEN};
+            // 4 (src_addr) + 4 (dst_addr) + 2 (src_port) + 2 (dst_port)
+            // + 4 (payload_len) + PAYLOAD_LEN = 16 + PAYLOAD_LEN.
+            assert_eq!(core::mem::size_of::<PayloadEvent>(), 16 + PAYLOAD_LEN);
+            assert_eq!(core::mem::align_of::<PayloadEvent>(), 4);
         }
     }
 }

@@ -266,3 +266,145 @@ pub fn category_counts() -> Vec<(&'static str, usize)> {
         })
         .collect()
 }
+
+/// True if `payload` begins with a recognised HTTP method token.
+///
+/// The DPI engine only inspects HTTP-anchored traffic — anything else (DNS,
+/// SSH banner, opaque TLS, raw TCP) is skipped without running the matcher.
+/// Returning a method here is what gates a packet into the rest of the
+/// pipeline.
+pub fn is_http_request(payload: &[u8]) -> bool {
+    const METHODS: &[&[u8]] = &[
+        b"GET ",
+        b"POST ",
+        b"PUT ",
+        b"HEAD ",
+        b"DELETE ",
+        b"OPTIONS ",
+        b"PATCH ",
+        b"CONNECT ",
+        b"TRACE ",
+    ];
+    METHODS.iter().any(|m| payload.starts_with(m))
+}
+
+/// Run the full DPI pipeline against one payload sample.
+///
+/// Returns `Some(&Sig)` for the first matching signature, or `None` if the
+/// payload is not HTTP-anchored or no signature fired. Tries the raw bytes
+/// first, then a single-pass URL-decoded view as a fallback — so
+/// `UNION%20SELECT` and `UNION+SELECT` both hit the `UNION SELECT` signature
+/// without the corpus having to enumerate every encoding.
+///
+/// The returned reference points into the static `SIGNATURES` table and is
+/// valid for the program's lifetime.
+pub fn match_payload(payload: &[u8]) -> Option<&'static Sig> {
+    if !is_http_request(payload) {
+        return None;
+    }
+
+    if let Some(mat) = matcher().find(payload) {
+        return Some(&SIGNATURES[mat.pattern().as_usize()]);
+    }
+
+    let decoded = url_decoded(payload)?;
+    let mat = matcher().find(&decoded)?;
+    Some(&SIGNATURES[mat.pattern().as_usize()])
+}
+
+/// One pass of URL decoding: `%XX` → byte, and `+` → space (the
+/// form-urlencoded convention).
+///
+/// Returns `None` if there is nothing to decode — letting the caller skip the
+/// allocation in the common case where the raw payload has no `%` or `+`.
+/// Double-encoded payloads (`%252E`) are intentionally only unwound one layer;
+/// the corpus already lists the common pre-encoded LFI variants explicitly.
+fn url_decoded(payload: &[u8]) -> Option<Vec<u8>> {
+    if !payload.iter().any(|&b| b == b'%' || b == b'+') {
+        return None;
+    }
+    let mut out: Vec<u8> = percent_encoding::percent_decode(payload).collect();
+    for b in out.iter_mut() {
+        if *b == b'+' {
+            *b = b' ';
+        }
+    }
+    Some(out)
+}
+
+/// Aho-Corasick automaton over every entry in `SIGNATURES`.
+///
+/// Built once on first use and reused for every packet. ASCII-case-insensitive
+/// so the matcher can scan raw payload bytes — no per-packet uppercase copy.
+/// Pattern indices into the returned matcher line up 1:1 with `SIGNATURES`,
+/// so `mat.pattern().as_usize()` directly yields the matched `Sig`.
+pub fn matcher() -> &'static aho_corasick::AhoCorasick {
+    use std::sync::OnceLock;
+    static M: OnceLock<aho_corasick::AhoCorasick> = OnceLock::new();
+    M.get_or_init(|| {
+        aho_corasick::AhoCorasick::builder()
+            .ascii_case_insensitive(true)
+            .build(SIGNATURES.iter().map(|s| s.pattern))
+            .expect("signature corpus compiles into a valid Aho-Corasick automaton")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hakam_common::PAYLOAD_LEN;
+
+    // Style convention: the corpus is hand-curated as uppercase strings so it
+    // greps and scans uniformly. The runtime matcher is case-insensitive so a
+    // mixed-case entry would still match — this test only catches drift.
+    #[test]
+    fn all_signatures_are_uppercase() {
+        for sig in SIGNATURES {
+            assert_eq!(
+                sig.pattern,
+                sig.pattern.to_ascii_uppercase(),
+                "signature '{}' ({}) contains lowercase bytes — it will never match",
+                sig.pattern,
+                sig.category,
+            );
+        }
+    }
+
+    // The kernel only ever samples the first PAYLOAD_LEN bytes of a TCP
+    // segment. Anything longer is dead weight at best, a silent miss at worst.
+    #[test]
+    fn no_signature_exceeds_payload_window() {
+        for sig in SIGNATURES {
+            assert!(
+                sig.pattern.len() <= PAYLOAD_LEN,
+                "signature '{}' ({}) is {} bytes — exceeds the {}-byte sample window",
+                sig.pattern,
+                sig.category,
+                sig.pattern.len(),
+                PAYLOAD_LEN,
+            );
+        }
+    }
+
+    #[test]
+    fn no_signature_is_empty() {
+        for sig in SIGNATURES {
+            assert!(
+                !sig.pattern.is_empty(),
+                "empty signature in category '{}'",
+                sig.category,
+            );
+        }
+    }
+
+    #[test]
+    fn category_table_is_complete() {
+        use std::collections::BTreeSet;
+        let declared: BTreeSet<&str> = CATEGORIES.iter().copied().collect();
+        let used: BTreeSet<&str> = SIGNATURES.iter().map(|s| s.category).collect();
+        assert_eq!(
+            declared, used,
+            "CATEGORIES table is out of sync with categories present in SIGNATURES",
+        );
+    }
+}

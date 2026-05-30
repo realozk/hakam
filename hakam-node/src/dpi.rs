@@ -5,29 +5,26 @@ use colored::Colorize;
 use hakam_common::{ConnectEvent, PayloadEvent};
 use tokio::{io::unix::AsyncFd, sync::Mutex};
 
+use hakam_node::{
+    reassembly::{FlowKey, Reassembler},
+    signatures,
+};
+
 use crate::{
     metrics::boot_time_ns,
-    signatures,
     telemetry::{block_json, connect_json, event_json, Sender},
 };
+
+// Run the reassembler GC every N payload events. At 64-byte samples this is
+// roughly once per 64 KB of inspected traffic — cheap enough to amortise the
+// linear scan over the flow table.
+const REASSEMBLY_GC_INTERVAL: u64 = 1024;
 
 #[derive(Default)]
 pub struct DpiStats {
     pub total_http_seen: u64,
     pub total_detections: u64,
     pub by_category: HashMap<&'static str, u64>,
-}
-
-fn is_http_request(payload: &str) -> bool {
-    payload.starts_with("GET ")
-        || payload.starts_with("POST ")
-        || payload.starts_with("PUT ")
-        || payload.starts_with("HEAD ")
-        || payload.starts_with("DELETE ")
-        || payload.starts_with("OPTIONS ")
-        || payload.starts_with("PATCH ")
-        || payload.starts_with("CONNECT ")
-        || payload.starts_with("TRACE ")
 }
 
 fn severity_paint(sev: &str) -> colored::ColoredString {
@@ -45,6 +42,9 @@ pub async fn payload_task(
     tx: Sender,
     stats: Arc<Mutex<DpiStats>>,
 ) {
+    let mut reassembler = Reassembler::with_defaults();
+    let mut events_seen: u64 = 0;
+
     loop {
         let mut guard = match ring.readable_mut().await {
             Ok(g) => g,
@@ -59,9 +59,22 @@ pub async fn payload_task(
 
             let event: &PayloadEvent = unsafe { &*(bytes.as_ptr() as *const PayloadEvent) };
             let len = (event.payload_len as usize).min(hakam_common::PAYLOAD_LEN);
-            let text = String::from_utf8_lossy(&event.payload[..len]);
+            let payload = &event.payload[..len];
 
-            if !is_http_request(&text) {
+            events_seen = events_seen.wrapping_add(1);
+            let now_ns = boot_time_ns();
+            if events_seen % REASSEMBLY_GC_INTERVAL == 0 {
+                reassembler.gc(now_ns);
+            }
+
+            let key = FlowKey::from_event(event);
+            let Some(view) = reassembler.ingest(key, payload, now_ns) else {
+                continue;
+            };
+
+            // Match against the reassembled view, not just this segment —
+            // that's the whole point of buffering.
+            if !signatures::is_http_request(view) {
                 continue;
             }
 
@@ -70,60 +83,59 @@ pub async fn payload_task(
                 s.total_http_seen += 1;
             }
 
-            let upper = text.to_ascii_uppercase();
+            let Some(sig) = signatures::match_payload(view) else {
+                continue;
+            };
 
-            for sig in signatures::SIGNATURES {
-                if upper.contains(sig.pattern) {
-                    let b = event.src_addr.to_ne_bytes();
-                    let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
-                    let ip_str = ip.to_string();
+            // Match fired — drop the flow's buffered state so we don't
+            // keep re-matching on subsequent segments of the same flow.
+            reassembler.forget(&key);
 
-                    println!();
-                    println!(
-                        "  {}  {}  {}  {}  {}  {}",
-                        "▼ INTERCEPT".bright_red().bold().on_black(),
-                        format!("[{}]", sig.category).bright_yellow().bold(),
-                        severity_paint(sig.severity),
-                        "FROM".bright_black(),
-                        ip_str.bright_white().bold(),
-                        format!("→ {}", sig.action).bright_red(),
-                    );
-                    println!(
-                        "  {}  {}",
-                        "   └─ pattern:".bright_black(),
-                        sig.pattern.yellow(),
-                    );
-                    println!();
+            let b = event.src_addr.to_ne_bytes();
+            let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+            let ip_str = ip.to_string();
 
-                    let now_ns = boot_time_ns();
-                    let key = Key::new(32, u32::from_ne_bytes(ip.octets()));
-                    let _ = blocklist.lock().await.insert(&key, &now_ns, 0);
+            println!();
+            println!(
+                "  {}  {}  {}  {}  {}  {}",
+                "▼ INTERCEPT".bright_red().bold().on_black(),
+                format!("[{}]", sig.category).bright_yellow().bold(),
+                severity_paint(sig.severity),
+                "FROM".bright_black(),
+                ip_str.bright_white().bold(),
+                format!("→ {}", sig.action).bright_red(),
+            );
+            println!(
+                "  {}  {}",
+                "   └─ pattern:".bright_black(),
+                sig.pattern.yellow(),
+            );
+            println!();
 
-                    {
-                        let mut s = stats.lock().await;
-                        s.total_detections += 1;
-                        *s.by_category.entry(sig.category).or_insert(0) += 1;
-                    }
+            let trie_key = Key::new(32, u32::from_ne_bytes(ip.octets()));
+            let _ = blocklist.lock().await.insert(&trie_key, &now_ns, 0);
 
-                    let _ = tx.send(block_json(
-                        &ip_str,
-                        "Edge Proxy",
-                        Some(sig.pattern),
-                        sig.action,
-                        Some(sig.category),
-                        Some(sig.severity),
-                    ));
-                    let _ = tx.send(event_json(
-                        &format!(
-                            "{} ({}) — pattern '{}' from {}",
-                            sig.category, sig.severity, sig.pattern, ip_str
-                        ),
-                        "critical",
-                    ));
-
-                    break;
-                }
+            {
+                let mut s = stats.lock().await;
+                s.total_detections += 1;
+                *s.by_category.entry(sig.category).or_insert(0) += 1;
             }
+
+            let _ = tx.send(block_json(
+                &ip_str,
+                "Edge Proxy",
+                Some(sig.pattern),
+                sig.action,
+                Some(sig.category),
+                Some(sig.severity),
+            ));
+            let _ = tx.send(event_json(
+                &format!(
+                    "{} ({}) — pattern '{}' from {}",
+                    sig.category, sig.severity, sig.pattern, ip_str
+                ),
+                "critical",
+            ));
         }
 
         guard.clear_ready();

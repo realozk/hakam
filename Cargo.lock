@@ -558,6 +558,7 @@ dependencies = [
 name = "hakam-node"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "aya",
  "aya-log",
@@ -568,6 +569,7 @@ dependencies = [
  "hakam-common",
  "libc",
  "log",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tokio",
