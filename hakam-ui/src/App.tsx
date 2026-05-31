@@ -306,9 +306,10 @@ export default function App() {
         zIndex: 20,
         display: 'grid',
         gridTemplateColumns: 'minmax(360px, 26%) minmax(0, 1fr)',
-        gridTemplateRows: 'minmax(0, 1fr) 116px',
+        gridTemplateRows: 'minmax(0, 1fr) 220px 116px',
         gridTemplateAreas: `
-          "status topology"
+          "status   topology"
+          "status   eventlog"
           "timeline timeline"
         `,
         gap: 'var(--sp-3)',
@@ -355,30 +356,10 @@ export default function App() {
           <AttackTimeline events={recentAttacks} startedAt={startedAt} />
         </Panel>
 
-        <div style={{
-          position: 'absolute',
-          bottom: 'calc(116px + var(--sp-3) + var(--sp-3))',
-          right: 'var(--sp-3)',
-          width: 420,
-          height: 270,
-          zIndex: 25,
-          display: 'flex',
-          flexDirection: 'column',
-          background: 'rgba(8, 10, 14, 0.96)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--r-panel)',
-          overflow: 'hidden',
-          boxShadow: '0 12px 32px -8px rgba(0,0,0,0.6)',
-        }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: 'var(--sp-2) var(--sp-3)',
-            borderBottom: '1px solid var(--border-dim)',
-            background: 'rgba(255,255,255,0.012)',
-          }}>
-            <span className="hk-label">EVENT_LOG</span>
+        <Panel
+          label="EVENT_LOG"
+          style={{ gridArea: 'eventlog' }}
+          actions={
             <button
               onClick={() => setLogFullscreen(true)}
               title="Expand (Esc to close)"
@@ -388,11 +369,10 @@ export default function App() {
               <Maximize2 size={9} strokeWidth={2} />
               <span>FULL</span>
             </button>
-          </div>
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <EventLog logs={logs} />
-          </div>
-        </div>
+          }
+        >
+          <EventLog logs={logs} />
+        </Panel>
       </main>
 
       {/* ── Footer ── */}
