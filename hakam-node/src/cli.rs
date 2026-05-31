@@ -15,11 +15,12 @@ use clap::Parser;
 use colored::Colorize;
 use tokio::sync::Mutex;
 
+use hakam_node::signatures;
+
 use crate::{
     dpi::DpiStats,
     maintenance::BLOCK_TTL_SECS,
     metrics::{boot_time_ns, read_latency_percentiles},
-    signatures,
     telemetry::{block_json, event_json, unblock_json, Sender},
 };
 
@@ -53,6 +54,11 @@ pub struct Args {
 
     #[arg(long, default_value = "127.0.0.1")]
     pub bind: std::net::IpAddr,
+
+    /// Restrict the sys_enter_connect tracepoint to this IPv4 prefix
+    /// (e.g. `10.99.0.0/16`). Omit to monitor every connect() on the host.
+    #[arg(long)]
+    pub monitor_prefix: Option<String>,
 }
 
 fn parse_xdp_flags(s: &str) -> Result<XdpFlags, String> {
