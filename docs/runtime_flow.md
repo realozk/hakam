@@ -16,18 +16,22 @@ Before the flows, here's every component that does something at runtime:
 |------|----|---------|----|
 | **XDP program** | kernel | Drop / pass / sample on ingress | Every ingress packet on the NIC |
 | **TC classifier** | kernel | Drop on egress for blocked dst | Every egress packet |
-| **Tracepoint** | kernel | Observe `connect()` syscalls | Every IPv4 outbound connect |
+| **Tracepoint** | kernel | Observe `connect()` syscalls (optionally CIDR-scoped) | Every IPv4 outbound connect |
 | **`BLOCKLIST`** | kernel map (LpmTrie) | CIDR-aware drop set | Read by XDP+TC, written by userspace |
-| **`PAYLOAD_EVENTS`** | kernel map (RingBuf, 1 MiB) | Sampled TCP bytes → userspace | Written by XDP, drained by `dpi_task` |
+| **`PAYLOAD_EVENTS`** | kernel map (RingBuf, 1 MiB) | TCP payload + 4-tuple → userspace | Written by XDP, drained by `payload_task` |
 | **`CONNECT_EVENTS`** | kernel map (RingBuf, 512 KiB) | connect() events → userspace | Written by tracepoint, drained by `connect_task` |
-| **`DROP_COUNTER`** | kernel map (PerCpu) | Total drops | Written by XDP+TC, read by `metrics_ticker` |
-| **`LATENCY_HIST`** | kernel map (PerCpu, 64 buckets) | Drop-path latency | Written by XDP, read by `metrics_ticker` |
-| **`PACKET_COUNTER`/`LAST_SEEN`** | kernel maps | 1-s sliding rate window | Written + read by XDP only |
-| **`dpi_task`** | userspace tokio task | Run substring match on payload, push BLOCK | Continuous |
+| **`DROP_COUNTER`** | kernel map (PerCpu) | Total drops | Written by XDP+TC, read by `metrics::ticker` |
+| **`LATENCY_HIST`** | kernel map (PerCpu, 64 buckets) | Drop-path latency | Written by XDP, read by `metrics::ticker` |
+| **`RING_OVERFLOW`** | kernel map (PerCpu, 1 cell) | Counter of payload samples we couldn't enqueue (ring full) | Written by XDP, read by `metrics::ticker` + CLI `stats` |
+| **`MONITOR_CFG`** | kernel map (Array, 1 cell) | Optional CIDR scope for the tracepoint (high32=network, low32=mask) | Read by tracepoint, written once at startup if `--monitor-prefix` set |
+| **`PACKET_COUNTER`/`LAST_SEEN`** | kernel maps (LruPerCpuHashMap) | 1-s sliding rate window with LRU eviction | Written + read by XDP only |
+| **`Reassembler`** | userspace (`hakam-node`/`reassembly.rs`) | Per-4-tuple TCP segment buffer (256 B / 30 s / 4096 flows) | Owned by `payload_task`; ingested per sample, GC'd every 1024 events |
+| **`payload_task`** | userspace tokio task | Reassemble per flow → matcher → BLOCK on hit | Continuous |
 | **`connect_task`** | userspace tokio task | Format and broadcast connect events | Continuous |
-| **`metrics_ticker`** | userspace tokio task | Build `METRICS` JSON | Every 1 s |
-| **`ttl_sweep_task`** | userspace tokio task | Expire BLOCKLIST entries | Every 30 s |
-| **`run_ws_server`** | userspace tokio task | Fan out telemetry to HUDs | On every WS subscribe |
+| **`metrics::ticker`** | userspace tokio task | Build `METRICS` JSON | Every 1 s |
+| **`maintenance::ttl_sweep_task`** | userspace tokio task | Expire BLOCKLIST entries | Every 30 s |
+| **`maintenance::server_cmd_task`** | userspace tokio task | Apply back-channel `DEMO_CMD` frames from the HUD | Continuous |
+| **`telemetry::run_ws_server`** | userspace tokio task | Fan out telemetry to HUDs | On every WS subscribe |
 | **CLI stdin loop** | userspace blocking task | Parse `block`/`list`/`stats`/etc. | On every keystroke |
 | **`tokio::broadcast<String>` (cap 512)** | userspace channel | Telemetry bus — every task writes, every WS client reads | Continuous |
 | **HUD `useHakamData()`** | browser | Open WS, parse JSON, derive UI state | On mount, then on every message |
@@ -45,26 +49,30 @@ T+10 s  xtask                  → sudo ip link set IFACE xdp off    (cleanup)
                               → exec sudo hakam-node --iface … --bpf-path …
 T+11 s  hakam-node main()    → Args::parse, env_logger, banner
                               → Ebpf::load_file(bpf_path)
-                              → take XDP program, .load(), .attach(IFACE, mode)
-                              → qdisc_add_clsact(IFACE) (tolerates EEXIST)
-                              → take TC program, .load(), .attach(IFACE, Egress)
-                              → take tracepoint program, .load(),
-                                .attach("syscalls", "sys_enter_connect")
+                              → attach_xdp (load + attach IFACE, mode)
+                              → attach_tc  (qdisc_add_clsact tolerates EEXIST, then load + Egress attach)
+                              → attach_tracepoint (load + attach "syscalls"/"sys_enter_connect")
                               → take_map for BLOCKLIST, DROP_COUNTER, LATENCY_HIST,
-                                PAYLOAD_EVENTS, CONNECT_EVENTS
+                                RING_OVERFLOW, PAYLOAD_EVENTS, CONNECT_EVENTS
+                              → if --monitor-prefix: take_map MONITOR_CFG,
+                                write pack_monitor_cfg(network, prefix_len) to cell 0
                               → broadcast::channel(512)         ← telemetry bus
-                              → spawn run_ws_server (binds 0.0.0.0:8080)
-                              → spawn metrics_ticker            (1 Hz)
-                              → spawn dpi_task                  (drains PAYLOAD_EVENTS)
-                              → spawn connect_task              (drains CONNECT_EVENTS)
-                              → spawn ttl_sweep_task            (30 s)
+                              → spawn telemetry::run_ws_server  (binds args.bind:8080)
+                              → spawn metrics::ticker           (1 Hz)
+                              → spawn dpi::payload_task         (drains PAYLOAD_EVENTS, owns Reassembler)
+                              → spawn dpi::connect_task         (drains CONNECT_EVENTS)
+                              → spawn maintenance::ttl_sweep_task   (30 s)
+                              → spawn maintenance::server_cmd_task  (HUD back-channel)
                               → spawn ctrl-C listener
                               → spawn_blocking stdin CLI loop
                               → tokio::select! { CLI exits ‖ shutdown signal }
-T+11 s  Three-line banner prints:
-          ◉ XDP        armed on [IFACE] mode=SKB (generic)
-          ◉ TC         armed on [IFACE] — outbound exfiltration killed at the NIC
-          ◉ telemetry  ws://0.0.0.0:8080/ws
+T+11 s  Banner prints:
+          ◉ XDP                armed on [IFACE] mode=SKB (generic)
+          ◉ TC                 armed on [IFACE] — outbound exfiltration killed at the NIC
+          ◉ tracepoint         armed — process-aware outbound connect() monitoring
+          ◉ tracepoint scope   → 10.99.0.0/16  (only if --monitor-prefix given)
+          ◉ telemetry          ws on ${--bind}:${--ws-port}/ws
+                               (default 127.0.0.1:8080; demo uses --bind 0.0.0.0)
         ← demo is now live.
 ```
 
@@ -117,15 +125,20 @@ Every packet that enters the NIC bound to hakam-node walks this path. **No alloc
                           no       │ yes
                        XDP_PASS    ▼
                        ┌────────────────────────────────────────┐
-                       │ sample_payload(): copy first 64 B of   │
-                       │ TCP payload into a reserved slot in    │
+                       │ sample_payload(src_addr, dst_addr):    │
+                       │ verify tcp_hdr_start+13 ≤ data_end,    │
+                       │ read TCP src_port + dst_port,          │
+                       │ parse data offset → tcp_hdr_len,       │
+                       │ copy first 64 B of TCP payload + the   │
+                       │ 4-tuple into a reserved slot in        │
                        │ PAYLOAD_EVENTS RingBuf, .submit()      │
+                       │ (RING_OVERFLOW++ if reserve fails)     │
                        └───────────┬────────────────────────────┘
                                    ▼
                               return XDP_PASS
 ```
 
-**Hot-path cost.** A blocked-IP drop is one LPM lookup + one PerCpu increment + one ktime read. A clean packet is one LPM miss + one HashMap upsert + one HashMap increment + (if TCP) one bounds-checked memcpy of 64 B + one ring-buffer reserve. No locks, no allocation, no syscall. The verifier guarantees this can't loop or stall the NIC.
+**Hot-path cost.** A blocked-IP drop is one LPM lookup + one PerCpu increment + one ktime read. A clean packet is one LPM miss + one LRU HashMap upsert + one LRU HashMap increment + (if TCP) one bounds-checked memcpy of 64 B + four 2/4-byte tuple reads + one ring-buffer reserve. No locks, no allocation, no syscall. The verifier guarantees this can't loop or stall the NIC.
 
 **Why latency only times the DROP path.** XDP_PASS means we let the packet through — the cost we want to advertise is the cost we add to a *drop*, because the pass case is what unloaded XDP would do anyway. So `record_latency(now − t0)` is gated by `if ret == XDP_DROP` (`hakam-ebpf/src/main.rs:81`).
 
@@ -164,6 +177,9 @@ This is the **outbound exfiltration kill** path — same blocklist, opposite dir
        │   read uservaddr ptr at TP offset 24     │
        │   bpf_probe_read_user → SockaddrIn       │
        │   sa.sin_family == AF_INET ?             │ no → return 0
+       │   MONITOR_CFG[0]:                        │
+       │     mask != 0 && (sin_addr & mask)       │
+       │       != network ?                       │ yes → return 0
        │   pid  = bpf_get_current_pid_tgid >> 32  │
        │   comm = bpf_get_current_comm()          │
        └──────────────────┬───────────────────────┘
@@ -177,7 +193,7 @@ This is the **outbound exfiltration kill** path — same blocklist, opposite dir
                     return 0  (observe-only)
 ```
 
-This program **never blocks** anything — it's pure observation. It exists so the HUD can answer *"which process tried to call out, and where to?"* — useful when an outbound block fires (TC kills the packet, tracepoint identifies the culprit by name + PID).
+This program **never blocks** anything — it's pure observation. It exists so the HUD can answer *"which process tried to call out, and where to?"* — useful when an outbound block fires (TC kills the packet, tracepoint identifies the culprit by name + PID). The `MONITOR_CFG` filter keeps the demo console free of DNS / apt / systemd-resolved noise; default cell value 0 leaves it system-wide.
 
 ---
 
@@ -195,18 +211,25 @@ t = 0 ms     attacker (10.99.1.13)    fires:  GET /search?q=' OR '1'='1 HTTP/1.1
 t ~ 0.1 ms   NIC → XDP                IPv4 ✓, src not in BLOCKLIST, count = 1
                                        (under 500), TCP ✓ → sample_payload()
                                        writes 64 B of "GET /search?q=' OR '1…"
-                                       to PAYLOAD_EVENTS, returns XDP_PASS.
-                                       (The first packet REACHES the host —
-                                       this is the honest "reactive, not
-                                       preventive" answer.)
-t ~ 0.2 ms   userspace dpi_task       AsyncFd wakes, drains the ring entry.
-                                       text = "GET /search?q=' OR '1'='1…"
-                                       is_http_request("GET ") → true.
-                                       upper = uppercased text.
-                                       Linear scan through SIGNATURES (~210):
-                                         "' OR '" matches.  category=SQLi,
-                                         action=XDP_DROP, severity=critical.
-t ~ 0.3 ms   userspace dpi_task       1. blocklist.lock().insert(
+                                       plus the full 4-tuple (10.99.1.13:eph
+                                       → 10.99.0.10:80) to PAYLOAD_EVENTS,
+                                       returns XDP_PASS. (The first packet
+                                       REACHES the host — this is the honest
+                                       "reactive, not preventive" answer.)
+t ~ 0.2 ms   userspace payload_task   AsyncFd wakes, drains the ring entry.
+                                       key = FlowKey::from_event(event)
+                                       view = reassembler.ingest(key, payload, now_ns)
+                                         → first segment of this flow, view =
+                                           "GET /search?q=' OR '1'='1…"
+                                       signatures::is_http_request(view) → true
+                                       signatures::match_payload(view):
+                                         → AC scan on raw bytes (case-insensitive)
+                                         → "' OR '" matches at position N.
+                                         → category=SQLi, action=XDP_DROP,
+                                           severity=critical.
+t ~ 0.3 ms   userspace payload_task   reassembler.forget(&key) — drop the flow
+                                       so HTTP keep-alive can reuse the tuple.
+                                       1. blocklist.lock().insert(
                                             (32, src=10.99.1.13), boot_ns)
                                          → updates the kernel map directly.
                                        2. DpiStats.total_detections += 1
@@ -481,11 +504,13 @@ Putting all of §2 through §9 together for one BLOCK:
    nc shoots a SQLi
       │
       ▼
-   NIC ── XDP hakam_ebpf ──► PAYLOAD_EVENTS RingBuf
+   NIC ── XDP hakam_ebpf ──► PAYLOAD_EVENTS RingBuf  (sample + 4-tuple)
       │            │                       │
       │            │                       ▼
-      │            │            tokio  dpi_task: HTTP gate → uppercase
-      │            │                       → SIGNATURES contains() → hit
+      │            │            tokio  payload_task: reassembler.ingest(flow)
+      │            │                       → HTTP gate → AC match (case-fold)
+      │            │                       → on miss: URL-decoded AC match
+      │            │                       → hit → reassembler.forget(flow)
       │            │                       │
       │            │              ┌────────┴────────┬──────────┐
       │            │              ▼                 ▼          ▼

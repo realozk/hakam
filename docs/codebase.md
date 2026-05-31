@@ -50,28 +50,34 @@ Workspace members: `hakam-common`, `hakam-ebpf`, `hakam-node`, `xtask`. `hakam-e
 
 ## 2 · `hakam-common/` — shared types
 
-**Single file: `src/lib.rs`** (150 LOC). Compiles `no_std` for the kernel, `std` for everything else (gated by the `std` feature).
+**Single file: `src/lib.rs`**. Compiles `no_std` for the kernel, `std` for everything else (gated by the `std` feature).
 
 ### Public surface
 | Item | What it is | Used by |
 |------|------------|---------|
 | `PAYLOAD_LEN: usize = 64` | Bytes sampled from each TCP segment | kernel + userspace DPI |
-| `struct PayloadEvent { src_addr, payload_len, payload[64] }` | RingBuf entry kernel→userspace | both sides |
+| `struct PayloadEvent { src_addr, dst_addr, src_port, dst_port, payload_len, payload[64] }` | RingBuf entry kernel→userspace; full 4-tuple lets userspace reassemble per flow. Wire byte order on every field copied from packet headers. | both sides |
 | `struct ConnectEvent { pid, comm[16], dst_addr, dst_port, _pad }` | Tracepoint event for outbound `connect()` | both sides |
 | `struct Ipv4Addr(pub u32)` | Tiny newtype (big-endian internal) with `from_octets`, `to_octets`, `as_raw` | userspace key generation |
 
 ### Non-public
 - `mod std_impls` (feature-gated) — `From<std::net::Ipv4Addr>` round-trips and a `Display` impl.
-- `mod tests` — 9 unit tests covering octet round-trip, big-endian raw value, equality, std conversion, mock map, and `ConnectEvent` layout (28 B / align 4).
+- `mod tests` — 10 unit tests covering octet round-trip, big-endian raw value, equality, std conversion, mock map, `ConnectEvent` layout (28 B / align 4), and `PayloadEvent` layout (16 + `PAYLOAD_LEN` = 80 B / align 4).
 
 ### Why this file matters
-Both the kernel program and the userspace consumer must agree on the byte layout of `PayloadEvent` and `ConnectEvent`. Any field added here without rebuilding both crates is a silent corruption bug.
+Both the kernel program and the userspace consumer must agree on the byte layout of `PayloadEvent` and `ConnectEvent`. Any field added here without rebuilding both crates is a silent corruption bug. The 4-tuple fields in `PayloadEvent` are what `hakam-node/src/reassembly.rs` keys its per-flow buffer on.
 
 ---
 
 ## 3 · `hakam-ebpf/` — kernel programs
 
-**Single file: `src/main.rs`** (310 LOC, `no_std` + `no_main`).
+`no_std` + `no_main`. Split across five files under `src/`:
+
+- `main.rs` — entry points, map declarations, constants, panic handler.
+- `xdp.rs` — `try_xdp` / `sample_payload` (ingress drop + payload sample).
+- `tc.rs` — `try_tc` (egress drop on blocked dst).
+- `tracepoint.rs` — `try_connect` (CIDR-scoped `sys_enter_connect` observer).
+- `helpers.rs` — verifier-safe `ptr_at`, `increment_drop_counter`, `record_latency`.
 
 ### Crate-level
 - `Cargo.toml` declares `aya-ebpf`, `aya-log-ebpf`, `network-types` as deps.
@@ -85,46 +91,49 @@ Both the kernel program and the userspace consumer must agree on the byte layout
 | `AF_INET` | `2` | Filter tracepoint to IPv4 only |
 | `TP_OFF_USERVADDR` | `24` | Byte offset of `uservaddr` in `sys_enter_connect` tracepoint args |
 
-### Maps (lines 39–70)
+### Maps (declared in `main.rs`)
 | Symbol | Type | Capacity | Purpose |
 |--------|------|---------:|---------|
 | `BLOCKLIST` | `LpmTrie<u32, u64>` | 1024 | CIDR-aware drop set; value = boot-time ns of insert |
-| `PACKET_COUNTER` | `HashMap<u32, u64>` | 1024 | Per-IP packets in current 1-s window |
-| `LAST_SEEN` | `HashMap<u32, u32>` | 1024 | Per-IP last-seen window-second; rolls counter |
-| `PAYLOAD_EVENTS` | `RingBuf` | 1 MiB | Sampled TCP payloads → userspace |
+| `PACKET_COUNTER` | `LruPerCpuHashMap<u32, u64>` | 1024 | Per-IP packets in current 1-s window. LRU eviction prevents new-attacker starvation past 1024 unique sources. |
+| `LAST_SEEN` | `LruPerCpuHashMap<u32, u32>` | 1024 | Per-IP last-seen window-second; rolls counter |
+| `PAYLOAD_EVENTS` | `RingBuf` | 1 MiB | Sampled TCP payloads + 4-tuple → userspace |
 | `CONNECT_EVENTS` | `RingBuf` | 512 KiB | Outbound `connect()` events → userspace |
 | `DROP_COUNTER` | `PerCpuArray<u64>` | 1 | Total drops; userspace sums across CPUs |
 | `LATENCY_HIST` | `PerCpuArray<u64>` | 64 | log2-bucketed XDP_DROP latency |
+| `RING_OVERFLOW` | `PerCpuArray<u64>` | 1 | Counter of samples dropped because `PAYLOAD_EVENTS` was full; surfaced in CLI `stats`. |
+| `MONITOR_CFG` | `Array<u64>` | 1 | Optional CIDR scope for `try_connect`. High 32 = network, low 32 = mask. Cell = 0 → monitor all. Set by `--monitor-prefix` flag. |
 
 ### Programs
 
-#### `hakam_ebpf` (XDP, lines 74–141)
+#### `hakam_ebpf` (XDP — entry in `main.rs`, body in `xdp.rs`)
 - Entry: `pub fn hakam_ebpf(ctx: XdpContext) -> u32`.
 - Times itself with `bpf_ktime_get_ns()` *only on the DROP path* via `record_latency()` (the line `if ret == xdp_action::XDP_DROP` gates this).
-- Delegates to `try_xdp()`:
-  1. Parse Eth → IPv4. Non-IPv4 = `XDP_PASS`.
+- Delegates to `xdp::try_xdp()`:
+  1. Parse Eth → IPv4. Non-IPv4 = `XDP_PASS`. Captures both `src_addr` and `dst_addr` from the IP header.
   2. **BLOCKLIST hit → `increment_drop_counter()` + `XDP_DROP`** (hot path).
   3. Sliding-1-s rate limit: if window rolled, reset counter; if count > 500, insert into BLOCKLIST and DROP.
-  4. If TCP, call `sample_payload()` to forward bytes to userspace via `PAYLOAD_EVENTS`.
+  4. If TCP, call `sample_payload(ctx, src_addr, dst_addr)` to forward bytes + 4-tuple to userspace via `PAYLOAD_EVENTS`.
   5. Return `XDP_PASS`.
 
-#### `hakam_egress` (TC classifier, lines 145–168)
+#### `hakam_egress` (TC classifier — body in `tc.rs`)
 - Entry: `pub fn hakam_egress(ctx: TcContext) -> i32`.
 - Reads ethertype + dst IP via `ctx.load()`.
 - If dst in BLOCKLIST → `TC_ACT_SHOT`. Else `TC_ACT_OK`.
 - This is the **outbound exfiltration kill** path.
 
-#### `hakam_connect` (tracepoint `sys_enter_connect`, lines 179–228)
+#### `hakam_connect` (tracepoint `sys_enter_connect` — body in `tracepoint.rs`)
 - Entry: `pub fn hakam_connect(ctx: TracePointContext) -> i32`.
-- Reads `uservaddr` pointer at offset 24, `bpf_probe_read_user`s a `SockaddrIn`, filters to `AF_INET`.
+- Reads `uservaddr` pointer at offset `TP_OFF_USERVADDR` (24), `bpf_probe_read_user`s a `SockaddrIn`, filters to `AF_INET`.
+- **`MONITOR_CFG` filter:** if the map cell's low 32 bits (mask) are non-zero, drop events whose `sa.sin_addr & mask != network`. Default cell value 0 → monitor all. Set from userspace by `--monitor-prefix`.
 - Fills `ConnectEvent { pid, comm, dst_addr, dst_port }` and submits via `CONNECT_EVENTS`.
 - Always returns 0 — observe-only, never blocks.
 
 ### Helpers
-- `sample_payload(ctx, src_addr)` (lines 232–267) — verifier-safe bounds check, parses IHL + TCP data offset, copies first `PAYLOAD_LEN` bytes into a reserved RingBuf slot.
-- `increment_drop_counter()` — `+=1` on per-CPU drop counter.
-- `record_latency(delta_ns)` — `floor(log2(delta))` bucketing, clamped to 63.
-- `ptr_at<T>(ctx, offset)` — verifier-safe pointer cast with bounds check (used by all packet parsing).
+- `xdp::sample_payload(ctx, src_addr, dst_addr)` — verifier-safe bounds check (`tcp_hdr_start + 13`), reads TCP src/dst port, parses TCP data offset, copies first `PAYLOAD_LEN` bytes plus the 4-tuple into a reserved RingBuf slot.
+- `helpers::increment_drop_counter()` — `+=1` on per-CPU drop counter.
+- `helpers::record_latency(delta_ns)` — `floor(log2(delta))` bucketing, clamped to 63.
+- `helpers::ptr_at<T>(ctx, offset)` — verifier-safe pointer cast with bounds check (used by all packet parsing).
 
 ### What it does NOT do
 - No string match. No regex. No allocation. No loops over user data. The eBPF verifier wouldn't allow any of this.
@@ -133,114 +142,113 @@ Both the kernel program and the userspace consumer must agree on the byte layout
 
 ## 4 · `hakam-node/` — userspace controller
 
-Two source files + one test file. **All non-test code is feature-gated `#[cfg(feature = "linux")]`** so the workspace stays cross-platform-checkable. Default Cargo build on macOS produces a stub that prints "requires Linux".
+Split into a **library crate** (cross-platform) and a **binary crate** (Linux-only).
+
+The library half (`src/lib.rs` + `signatures.rs` + `reassembly.rs` + `monitor.rs`) compiles on macOS, has 16 inline tests, and is exercised by 40 integration tests across `tests/`. The binary half (`src/main.rs` + `cli.rs` + `dpi.rs` + `maintenance.rs` + `metrics.rs` + `telemetry.rs`) is feature-gated `#[cfg(feature = "linux")]` — default Cargo build on macOS produces a stub that prints "requires Linux".
 
 ### `Cargo.toml`
-- Mandatory deps: `anyhow`, `env_logger`, `colored`, `hakam-common`.
+- Mandatory deps (always-on, lib + tests use them): `anyhow`, `env_logger`, `colored`, `aho-corasick`, `percent-encoding`, `hakam-common`.
 - Linux-only deps under `features.linux`: `aya`, `aya-log`, `tokio`, `clap`, `log`, `warp`, `serde`, `serde_json`, `futures-util`, `libc`.
-- `features.default = []` → must opt in with `--features linux`.
+- `features.default = []` → must opt in with `--features linux` to build the bin.
 
-### `src/signatures.rs` — DPI signature corpus (268 LOC)
+### `src/lib.rs` — library entry
+Re-exports the three platform-independent modules: `monitor`, `reassembly`, `signatures`. Anything that does not link `aya` / `libc` lives here so it gets `cargo test` coverage on any host.
+
+### `src/signatures.rs` — DPI signature corpus + matcher
 - `pub struct Sig { pattern, category, action, severity }` — all `&'static str`.
 - `const fn sig(...)` — constructor used to build the table at compile time.
-- `pub const SIGNATURES: &[Sig]` — the corpus. **210 entries** across 13 families:
-  - SQLi (~30), XSS (~30), LFI (~20), RCE (~30), SSRF (~15), XXE (~10),
-  - Log4Shell (~7), Deserial (3), NoSQLi (~10), SSTI (~10),
-  - WebShell (~10), Recon (~15), CVE (~10).
+- `pub const SIGNATURES: &[Sig]` — the corpus. **203 entries** across 13 families: SQLi (~30), XSS (~30), LFI (~20), RCE (~30), SSRF (~15), XXE (~10), Log4Shell (~7), Deserial (3), NoSQLi (~10), SSTI (~10), WebShell (~10), Recon (~15), CVE (~10).
 - `pub const CATEGORIES: &[&str]` — display order for the CLI / HUD.
 - `pub fn category_counts() -> Vec<(&str, usize)>` — used by the `rules` CLI command.
+- `pub fn is_http_request(payload: &[u8]) -> bool` — checks startswith for the 9 HTTP verbs. The gate that decides whether a payload reaches the matcher.
+- `pub fn matcher() -> &'static AhoCorasick` — Aho-Corasick automaton over the corpus, built once via `OnceLock`. `ascii_case_insensitive(true)` so it scans raw payload bytes with no allocation.
+- `pub fn match_payload(payload: &[u8]) -> Option<&'static Sig>` — the single matcher entrypoint. Gate → AC scan on raw bytes → fallback AC scan on URL-decoded bytes. Returns the first hit.
+- `fn url_decoded(payload: &[u8]) -> Option<Vec<u8>>` — single-pass `%XX` → byte plus `+` → space; returns `None` if no `%` or `+` present so the caller skips allocation.
+- 4 inline invariant tests pinning uppercase / non-empty / ≤ `PAYLOAD_LEN` / category-table sync.
 
-**Patterns are uppercase substrings.** Matching is case-folded `contains()` against the uppercased payload — no regex, no decoding, no anchoring beyond the HTTP method prefix that the DPI task checks first.
+**Patterns are uppercase substrings by convention.** Runtime matching is case-folded inside the Aho-Corasick automaton — a lowercase corpus entry would still match, but the test fails the build to keep the corpus visually uniform.
 
-### `src/main.rs` — wiring (1.3k LOC)
+### `src/reassembly.rs` — userspace TCP segment buffer
+- `pub struct FlowKey { src_addr, dst_addr, src_port, dst_port }` + `FlowKey::from_event(&PayloadEvent)` constructor.
+- `pub struct Reassembler` (private fields). API: `new(max_buf, ttl_ns, max_flows)`, `with_defaults()`, `ingest(key, payload, now_ns) -> Option<&[u8]>`, `forget(&key)`, `gc(now_ns) -> usize`, `flow_count()`, `dropped_full_buf()`, `dropped_at_cap()`.
+- Defaults: `DEFAULT_MAX_FLOW_BUF = 256` B, `DEFAULT_FLOW_TTL_NS = 30 s`, `DEFAULT_MAX_FLOWS = 4096`.
+- `FlowState` is deliberately laid out so the Phase 2 #7 eBPF conntrack can add `seq_next` / `dir` fields without rewriting the reassembly logic.
+- 7 inline tests + 4 integration tests in `tests/reassembly.rs` covering split-segment attacks end-to-end.
 
-This file does six things. Section anchors below match the file's own comment headers.
+### `src/monitor.rs` — `MONITOR_CFG` packer
+- `pub fn pack_monitor_cfg(network: Ipv4Addr, prefix_len: u32) -> u64` — packs an IPv4 prefix into the `u64` cell layout the kernel filter expects (high 32 = network in wire-byte order, low 32 = mask).
+- 5 inline tests covering /0 (monitor-all sentinel), /16, /24, /32.
 
-#### a) Telemetry JSON helpers (lines ~67–156)
-- `json_escape(s)` — minimal JSON escaper for the WS payloads.
-- `metrics_json(...)` — builds `{"type":"METRICS", ...}`.
-- `event_json(message, level)` — builds `{"type":"EVENT", ...}`.
-- `block_json(source, target, payload, action, category, severity)` — builds `{"type":"BLOCK", ...}` (used both by DPI and manual `block` command).
-- `unblock_json(source)` — builds `{"type":"UNBLOCK", ...}`.
-- `connect_json(pid, comm, dst, port)` — builds `{"type":"CONNECT", ...}`.
+### `src/main.rs` — Linux runtime entry point
 
-These five `type` values are the only telemetry shapes the HUD knows about.
-
-#### b) CLI args (lines ~158–199)
-- `struct Args { iface, bpf_path, mode, log_level, ws_port }` (clap derive).
-- `parse_xdp_flags(s)` — accepts `skb` (default) / `drv` / `hw` / `default`.
-
-#### c) Terminal output (lines ~201–349)
-- `print_banner()`, `print_attached(...)`, `print_prompt()`, `print_block_deployed(...)`, `print_unblock(...)`, `print_error(...)`, `print_help()`.
-- All cosmetic — colored output via the `colored` crate.
-
-#### d) CIDR + LPM helpers (lines ~351–399)
-- `parse_cidr(s)` — accepts `1.2.3.4` or `10.0.0.0/24`. Zeros host bits beyond the prefix.
-- `lpm_key(ip, prefix)` → `aya::maps::lpm_trie::Key<u32>`.
-- `format_lpm_key(&key)` — pretty-print back to `IP` or `IP/prefix`.
-
-#### e) Time + latency (lines ~401–449)
-- `boot_time_ns()` — `clock_gettime(CLOCK_BOOTTIME)`. Same reference clock as `bpf_ktime_get_ns()` in the kernel, so timestamps round-trip.
-- `read_latency_percentiles(hist)` — sums per-CPU buckets, returns `(p50_ns, p99_ns)`. Bucket midpoint is `2^n * 1.5`.
-
-#### f) Async tasks
-
-**`run_ws_server(telemetry_tx, port)`** (lines ~454–475)
-- `warp` server on `0.0.0.0:8080/ws`. Each connecting client gets a `tokio::broadcast::Receiver` and a fan-out task in `handle_ws_client`.
-
-**`metrics_ticker(...)`** (lines ~500–543), 1 Hz
-- Reads `DROP_COUNTER` (sum across CPUs), `LATENCY_HIST` percentiles, `/proc/stat` (CPU%), `/proc/net/dev` (rx/tx bytes), `/proc/self/status` (RSS).
-- Emits one `METRICS` JSON per tick.
-- Helper readers: `read_cpu_usage_percent()`, `read_iface_bytes(iface)`, `read_self_rss_kb()`.
-
-**`dpi_task(ring, blocklist, tx, stats)`** (lines ~636–718) — **this is the core DPI loop.**
-- Async-reads `PAYLOAD_EVENTS` ring via `AsyncFd`.
-- Per event: `is_http_request()` gate (drop non-HTTP traffic instantly), uppercase, scan `signatures::SIGNATURES` with `contains()`, first hit wins.
-- On hit:
-  1. Pretty-prints to the kernel CLI.
-  2. Inserts `(src_addr/32, boot_time_ns)` into `BLOCKLIST`.
-  3. Updates `DpiStats` (total + per-category counters).
-  4. Broadcasts `BLOCK` JSON + a critical `EVENT` JSON.
-- `is_http_request(payload)` — checks startswith for the 9 HTTP verbs.
-- `severity_paint(sev)` — returns a colored string for terminal.
-- `struct DpiStats { total_detections, by_category }` — drives the `stats` CLI command.
-
-**`connect_task(ring, tx)`** (lines ~723–764)
-- Drains `CONNECT_EVENTS`, formats PID + comm + dst, prints to CLI, broadcasts `CONNECT` JSON.
-
-**`ttl_sweep_task(blocklist, tx)`** (lines ~771–808), every 30 s
-- Iterates BLOCKLIST, finds entries older than `BLOCK_TTL_SECS = 120`, removes them, broadcasts `UNBLOCK` + an `EVENT`.
-
-#### g) `main()` (lines ~813–1294)
+Loads the eBPF ELF, attaches XDP / TC / tracepoint, takes every map, populates `MONITOR_CFG` from `--monitor-prefix`, spawns the async tasks, runs the stdin CLI loop, handles Ctrl-C cleanup. Delegates everything else to the sibling modules.
 
 Boot order:
-1. `Args::parse()`, `env_logger` init, `print_banner()`.
+1. `Args::parse()`, `env_logger` init, `cli::print_banner()`.
 2. Canonicalize the BPF ELF path; `Ebpf::load_file`.
-3. Take the XDP program → `load()` → `attach(iface, mode)`. `print_attached()`.
-4. Take the TC program → `qdisc_add_clsact(iface)` (tolerant of "already exists") → `load()` → `attach(iface, TcAttachType::Egress)`.
-5. Take the tracepoint program → `load()` → `attach("syscalls", "sys_enter_connect")` (warns and continues if unavailable).
-6. `bpf.take_map(...)` for `BLOCKLIST`, `DROP_COUNTER`, `LATENCY_HIST`, `PAYLOAD_EVENTS`, `CONNECT_EVENTS`.
-7. `broadcast::channel::<String>(512)` — telemetry bus.
-8. Spawn 5 tasks: WS server, metrics ticker, DPI, connect, TTL sweep.
-9. Spawn ctrl-C listener (sends `()` on a oneshot to the main `select!`).
-10. Spawn `task::spawn_blocking` for the stdin CLI (so it never blocks tokio).
-11. `tokio::select!` on the CLI task and the shutdown signal.
+3. `attach_xdp` → `attach_tc` → `attach_tracepoint`.
+4. `bpf.take_map(...)` for `BLOCKLIST`, `DROP_COUNTER`, `LATENCY_HIST`, `RING_OVERFLOW`, `PAYLOAD_EVENTS`, `CONNECT_EVENTS`. If `--monitor-prefix` set, also take `MONITOR_CFG` and write `pack_monitor_cfg(network, prefix_len)` to cell 0.
+5. `broadcast::channel::<String>(512)` — telemetry bus.
+6. Spawn tasks: `telemetry::run_ws_server`, `metrics::ticker`, `dpi::payload_task`, `dpi::connect_task`, `maintenance::ttl_sweep_task`, `maintenance::server_cmd_task`.
+7. Spawn ctrl-C listener (sends `()` on a oneshot to the main `select!`).
+8. Spawn `task::spawn_blocking` for the stdin CLI (so it never blocks tokio).
+9. `tokio::select!` on the CLI task and the shutdown signal.
 
-**CLI commands (in the stdin loop)** — each branch lives inside the `match cmd.as_str()` block:
-- `block <IP[/prefix]>` — parse_cidr → LPM insert → broadcast BLOCK + EVENT.
-- `unblock <IP[/prefix]>` — LPM remove → broadcast UNBLOCK + EVENT.
-- `list` — iterate BLOCKLIST, format with age + TTL remaining.
-- `status` — interface, BPF ELF, hooks, rate limit, TTL, signatures, blocklist size.
-- `rules` / `sigs` / `signatures` — bar chart of `category_counts()`.
-- `stats` — kernel drops, p50/p99 ns, DPI total, per-family breakdown.
-- `clear` — drop every BLOCKLIST entry, broadcast UNBLOCK for each.
-- `help` / `?` — print the command reference.
-- `quit` / `exit` / `q` — break out of the CLI loop, drop links → all hooks detach.
+### `src/cli.rs` — CLI args, banner, stdin command loop
 
-### `tests/unit_tests.rs` (157 LOC, 8 tests)
-- Cross-platform — depends only on `std` and `hakam-common`, no `aya`.
-- Covers: byte-order conversion, mock blocklist insert/remove, distinct keys for distinct IPs, loopback key value, `HakamIp` matches std, command tokenization (block/unblock/no-arg), invalid-IP rejection, valid-IP acceptance, mock-map capacity at 1024.
-- **Does not** load eBPF, attach hooks, or fire packets. Honest unit-only coverage.
+- `struct Args { iface, bpf_path, mode, log_level, ws_port, bind, monitor_prefix }` (clap derive). `--monitor-prefix 10.99.0.0/16` scopes the connect tracepoint via `MONITOR_CFG`.
+- `parse_xdp_flags(s)` — accepts `skb` (default) / `drv` / `hw` / `default`.
+- `parse_cidr(s)` — accepts `1.2.3.4` or `10.0.0.0/24`. Zeros host bits beyond the prefix.
+- `lpm_key(ip, prefix)` → `aya::maps::lpm_trie::Key<u32>`; `format_lpm_key(&key)` — pretty-print.
+- `print_banner`, `print_attached`, `print_prompt`, `print_block_deployed`, `print_unblock`, `print_error`, `print_help` — colored terminal output via the `colored` crate.
+- `struct CliCtx { blocklist, telemetry, stats, drop_counter, latency_hist, ring_overflow, iface, bpf_path }` — what the stdin loop holds onto.
+- `run_stdin_loop(ctx)` — the command match:
+  - `block <IP[/prefix]>` — parse_cidr → LPM insert → broadcast BLOCK + EVENT.
+  - `unblock <IP[/prefix]>` — LPM remove → broadcast UNBLOCK + EVENT.
+  - `list` — iterate BLOCKLIST, format with age + TTL remaining.
+  - `status` — interface, BPF ELF, hooks, rate limit, TTL, signatures, blocklist size.
+  - `rules` / `sigs` / `signatures` — bar chart of `category_counts()`.
+  - `stats` — kernel drops, p50/p99 ns, DPI total, per-family breakdown, ring overflows.
+  - `clear` — drop every BLOCKLIST entry, broadcast UNBLOCK for each.
+  - `help` / `?` — print the command reference.
+  - `quit` / `exit` / `q` — break out of the CLI loop, drop links → all hooks detach.
+
+### `src/dpi.rs` — payload + connect ring-buffer consumers
+
+- `struct DpiStats { total_http_seen, total_detections, by_category }` — drives the `stats` CLI command.
+- `pub async fn payload_task(ring, blocklist, tx, stats)` — **the core DPI loop.**
+  - Owns a local `Reassembler::with_defaults()` and an `events_seen` counter; runs `reassembler.gc(now_ns)` every `REASSEMBLY_GC_INTERVAL` (1024 events).
+  - Per event: build `FlowKey::from_event`, `reassembler.ingest(key, payload, now_ns)`, `signatures::is_http_request(view)` gate, then `signatures::match_payload(view)`. On hit: `reassembler.forget(&key)`, insert into BLOCKLIST, update `DpiStats`, broadcast BLOCK + critical EVENT, pretty-print to console.
+- `pub async fn connect_task(ring, tx)` — drains `CONNECT_EVENTS`, formats PID + comm + dst, prints to console, broadcasts CONNECT JSON.
+- `severity_paint(sev)` — returns a colored string for terminal.
+
+### `src/maintenance.rs` — periodic blocklist housekeeping
+
+- `BLOCK_TTL_SECS = 120` constant.
+- `ttl_sweep_task(blocklist, tx)` — every 30 s, iterates `BLOCKLIST`, removes entries whose age exceeds `BLOCK_TTL_SECS`, broadcasts `UNBLOCK` + an `EVENT`.
+- `server_cmd_task(blocklist, tx)` — listens for back-channel `DEMO_CMD` frames from the HUD over the WS.
+
+### `src/metrics.rs` — system + kernel metrics
+
+- `boot_time_ns()` — `clock_gettime(CLOCK_BOOTTIME)`. Same reference clock as `bpf_ktime_get_ns()` in the kernel, so timestamps round-trip.
+- `read_latency_percentiles(hist)` — sums per-CPU `LATENCY_HIST` buckets, returns `(p50_ns, p99_ns)`. Bucket midpoint is `2^n * 1.5`.
+- `ticker(tx, drop_counter, latency_hist, ring_overflow, iface)` — 1 Hz task. Reads `DROP_COUNTER` (sum across CPUs), latency percentiles, `RING_OVERFLOW` sum, `/proc/stat` (CPU%), `/proc/net/dev` (rx/tx bytes), `/proc/self/status` (RSS). Emits one `METRICS` JSON per tick.
+
+### `src/telemetry.rs` — JSON builders + WS server
+
+- `json_escape(s)` — minimal JSON escaper for the WS payloads.
+- `metrics_json(...)`, `event_json(message, level)`, `block_json(source, target, payload, action, category, severity)`, `unblock_json(source)`, `connect_json(pid, comm, dst, port)` — the five telemetry shapes the HUD knows about (plus `SCENARIO` which the HUD emits for self-driven demo cycles).
+- `Sender = broadcast::Sender<String>` — telemetry bus type alias used everywhere.
+- `run_ws_server(tx, port, bind)` — `warp` server on `${bind}:${port}/ws`. Each connecting client gets a `tokio::broadcast::Receiver` and a fan-out task in `handle_ws_client`.
+
+### `tests/unit_tests.rs` — 11 cross-platform unit tests
+Byte-order conversion, mock blocklist insert/remove, distinct keys for distinct IPs, loopback key value, `HakamIp` matches std, command tokenization (block / unblock / no-arg), invalid-IP rejection, valid-IP acceptance, mock-map capacity at 1024. Does not load eBPF, attach hooks, or fire packets.
+
+### `tests/dpi_matcher.rs` — 25 end-to-end matcher tests
+One `#[test]` per row of [`evasion.md`](evasion.md): HIT rows enforce the guarantees we make on stage; MISS rows lock down the documented gaps so a regression that secretly closes them shows up in CI (and so the docs stay honest as the matcher evolves). Plus HTTP-gate coverage, smoke coverage, and a "every declared category has a matchable signature" round-trip.
+
+### `tests/reassembly.rs` — 4 end-to-end reassembly tests
+The split-segment evasion scenarios: `split_union_select_caught_after_segment_two`, `split_across_three_segments`, `parallel_flows_match_independently`, `forget_after_match_lets_same_flow_be_reinspected`.
 
 ---
 
@@ -378,12 +386,17 @@ Optional Tauri desktop wrapper — `tauri.conf.json`, `Cargo.toml`, `build.rs`, 
 
 | If you want to change… | Edit this |
 |------|----|
-| The DPI string corpus | `hakam-node/src/signatures.rs` |
-| What action is taken on a hit (drop/log/etc) | `hakam-node/src/main.rs` `dpi_task()` |
+| The DPI string corpus | `hakam-node/src/signatures.rs` `SIGNATURES` |
+| The matcher pipeline (gate / AC / URL decode) | `hakam-node/src/signatures.rs` `match_payload`, `matcher`, `url_decoded` |
+| What action is taken on a hit (drop / log / etc) | `hakam-node/src/dpi.rs` `payload_task` |
+| Per-flow buffer caps (256 B, 30 s TTL, 4096 flows) | `hakam-node/src/reassembly.rs` `DEFAULT_MAX_FLOW_BUF` / `DEFAULT_FLOW_TTL_NS` / `DEFAULT_MAX_FLOWS` |
+| Reassembly GC interval (every 1024 events) | `hakam-node/src/dpi.rs` constant `REASSEMBLY_GC_INTERVAL` |
 | The auto-block rate threshold (500 pps) | `hakam-ebpf/src/main.rs` constant `RATE_LIMIT` |
-| The block TTL (120 s) | `hakam-node/src/main.rs` constant `BLOCK_TTL_SECS` |
+| The block TTL (120 s) | `hakam-node/src/maintenance.rs` constant `BLOCK_TTL_SECS` |
 | Payload sample window (64 B) | `hakam-common/src/lib.rs` constant `PAYLOAD_LEN` |
-| Telemetry JSON shape | `hakam-node/src/main.rs` `*_json(...)` builders |
+| Telemetry JSON shape | `hakam-node/src/telemetry.rs` `*_json(...)` builders |
+| WS bind address (default `127.0.0.1`) | `hakam-node/src/cli.rs` `Args::bind` |
+| Tracepoint CIDR scope | `hakam-node/src/cli.rs` `Args::monitor_prefix` + `hakam-ebpf/src/main.rs` map `MONITOR_CFG` |
 | WS reconnect / parse logic | `hakam-ui/src/utils/websocket.ts` `useHakamData()` |
 | Hero panel layout | `hakam-ui/src/components/HakamStatus.tsx` |
 | Topology positions / edges | `hakam-ui/src/components/TopologyMap.tsx` `POS` and `EDGES` |
