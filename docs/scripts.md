@@ -147,6 +147,29 @@ Prerequisites: `websocat` (`cargo install websocat`), `nc`.
 
 ---
 
+### `validate_phase1.sh`
+**Acceptance suite for the Phase 1 changes** (Aho-Corasick + URL decoding + TCP reassembly + B2 tracepoint scope). Builds the eBPF, launches hakam-node on `lo` with `--monitor-prefix 10.99.0.0/16`, then fires six probes and verifies each produced the expected WebSocket telemetry:
+
+1. eBPF build / verifier go-no-go
+2. Launch + B2 banner + telemetry pipe up
+3. Regression — classic single-segment SQLi + XSS still block
+4. URL decoding — `%20`-encoded SQLi and `+`-encoded SQLi both match
+5. Split-segment reassembly — two TCP writes with `sleep 0.2` between, expects a BLOCK on the reassembled view
+6. Tracepoint CIDR scope — in-scope CONNECT surfaces, out-of-scope is filtered
+
+```bash
+./scripts/validate_phase1.sh
+# env overrides:
+TARGET_IP=10.99.0.10 TARGET_PORT=80 ./scripts/validate_phase1.sh
+MONITOR_PREFIX=10.99.0.0/24 OUT_OF_SCOPE_IP=127.0.0.1 ./scripts/validate_phase1.sh
+```
+
+Prerequisites: `cargo`, `nc`, `websocat`, `jq`, passwordless `sudo`, and `setup-demo.sh` has run (binds the `10.99.x.y` aliases the probes fire from).
+
+Exit `0` = all six green. Exit `1` = at least one probe failed; logs are preserved under `/tmp/hakam-validate-*.log` for inspection. Run before starting Phase 2 work — this is the gate that catches BPF verifier rejections of the new `xdp.rs` bounds check.
+
+---
+
 ## Benchmark
 
 ### `bench-setup.sh`
