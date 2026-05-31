@@ -266,10 +266,10 @@ Pick any question a Black Hat reviewer might fire. Compare today vs. after:
 | 1 | A3 — LRU eviction | ✅ done | next commit |
 | 1 | A4 — ring overflow counter | ✅ done | `8922004` |
 | 2 | B1 — Aho-Corasick | ✅ done | (case-insensitive, drops per-packet uppercase copy) |
-| 2 | B2 — tracepoint scope | ⬜ pending | — |
+| 2 | B2 — tracepoint scope | ✅ done | MONITOR_CFG Array map; --monitor-prefix CLI; hakam_node::monitor::pack_monitor_cfg + 5 tests |
 | 2 | B3 — DPI matcher tests | ✅ done | hakam-node lib + tests/dpi_matcher.rs (25 tests) |
 | 2 | B4 — uppercase assertion | ✅ done | + length and category-table invariants |
 
-**Progress: 7 of 8 (only B2 — tracepoint scope — remains in Session 2).**
+**Progress: 8 of 8. Both sessions complete.**
 
 Update this table as you ship each item.

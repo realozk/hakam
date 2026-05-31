@@ -3,7 +3,7 @@
 
 use aya_ebpf::{
     macros::{classifier, map, tracepoint, xdp},
-    maps::{LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf},
+    maps::{Array, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf},
     programs::{TcContext, TracePointContext, XdpContext},
 };
 
@@ -69,6 +69,15 @@ pub static LATENCY_HIST: PerCpuArray<u64> = PerCpuArray::<u64>::with_max_entries
 // userspace `stats` so the operator sees when DPI falls behind line rate.
 #[map]
 pub static RING_OVERFLOW: PerCpuArray<u64> = PerCpuArray::<u64>::with_max_entries(1, 0);
+
+// Optional CIDR filter for the sys_enter_connect tracepoint. Packed as
+//   high 32 bits = network address (same byte order as sockaddr_in.sin_addr)
+//   low  32 bits = mask        (same byte order; 0 means "monitor every connect()").
+// Default (cell value 0) leaves the tracepoint system-wide; the userspace
+// `--monitor-prefix` flag narrows it to e.g. 10.99.0.0/16 to keep the demo
+// console free of DNS / apt / systemd-resolved noise.
+#[map]
+pub static MONITOR_CFG: Array<u64> = Array::<u64>::with_max_entries(1, 0);
 
 #[xdp]
 pub fn hakam_ebpf(ctx: XdpContext) -> u32 {

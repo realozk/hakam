@@ -4,7 +4,7 @@ use aya_ebpf::{
 };
 use hakam_common::ConnectEvent;
 
-use crate::{AF_INET, CONNECT_EVENTS, TP_OFF_USERVADDR};
+use crate::{AF_INET, CONNECT_EVENTS, MONITOR_CFG, TP_OFF_USERVADDR};
 
 #[repr(C)]
 struct SockaddrIn {
@@ -33,6 +33,16 @@ fn try_connect(ctx: &TracePointContext) -> Result<i32, ()> {
 
     if sa.sin_family != AF_INET {
         return Ok(0);
+    }
+
+    // Optional CIDR scope: drop connect() events outside the monitored prefix
+    // before we burn a ring-buffer slot on them. mask == 0 → monitor all.
+    if let Some(cfg) = MONITOR_CFG.get(0) {
+        let network = (*cfg >> 32) as u32;
+        let mask = *cfg as u32;
+        if mask != 0 && (sa.sin_addr & mask) != network {
+            return Ok(0);
+        }
     }
 
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;

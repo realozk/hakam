@@ -5,5 +5,6 @@
 //! contains the Linux-only runtime (eBPF loading, XDP/TC attachment, async
 //! ring-buffer consumers).
 
+pub mod monitor;
 pub mod reassembly;
 pub mod signatures;

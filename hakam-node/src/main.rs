@@ -22,7 +22,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 #[cfg(feature = "linux")]
 use aya::{
-    maps::{LpmTrie, PerCpuArray, RingBuf},
+    maps::{Array, LpmTrie, PerCpuArray, RingBuf},
     programs::{
         tc::{qdisc_add_clsact, TcAttachType},
         SchedClassifier, TracePoint, Xdp, XdpFlags,
@@ -45,8 +45,11 @@ use tokio::{
 };
 
 #[cfg(feature = "linux")]
+use hakam_node::monitor::pack_monitor_cfg;
+
+#[cfg(feature = "linux")]
 use crate::{
-    cli::{Args, CliCtx},
+    cli::{parse_cidr, Args, CliCtx},
     dpi::DpiStats,
 };
 
@@ -119,6 +122,27 @@ async fn main() -> Result<()> {
         bpf.take_map("CONNECT_EVENTS").context("Map 'CONNECT_EVENTS' not found")?,
     )
     .context("Failed to interpret 'CONNECT_EVENTS' as RingBuf")?;
+
+    if let Some(prefix_str) = args.monitor_prefix.as_deref() {
+        let (network, prefix_len) = parse_cidr(prefix_str)
+            .map_err(|e| anyhow::anyhow!("--monitor-prefix: {e}"))?;
+        let mut monitor_cfg: Array<_, u64> = Array::try_from(
+            bpf.take_map("MONITOR_CFG")
+                .context("Map 'MONITOR_CFG' not found — rebuild eBPF with cargo xtask build-ebpf")?,
+        )
+        .context("Failed to interpret 'MONITOR_CFG' as Array<u64>")?;
+        monitor_cfg
+            .set(0, pack_monitor_cfg(network, prefix_len), 0)
+            .context("Failed to write MONITOR_CFG[0]")?;
+        info!("Tracepoint scoped to {}/{}", network, prefix_len);
+        println!(
+            "  {}  {} {} {}",
+            "◉".bright_blue().bold(),
+            "tracepoint scope".bright_blue().bold(),
+            "→".bright_black(),
+            format!("{}/{}", network, prefix_len).cyan(),
+        );
+    }
 
     // ── Spawn async tasks ──────────────────────────────────────────────────
     let (telemetry_tx, _) = broadcast::channel::<String>(512);
