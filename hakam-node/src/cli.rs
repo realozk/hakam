@@ -335,6 +335,8 @@ fn cmd_block(ctx: &CliCtx, arg: Option<&str>) {
                         "XDP_DROP",
                         Some("Manual"),
                         Some("high"),
+                        None,
+                        None,
                     ));
                     let _ = ctx.telemetry.send(event_json(
                         &format!("Manual block: {} → XDP_DROP", display),

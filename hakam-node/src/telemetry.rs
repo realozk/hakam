@@ -54,8 +54,10 @@ pub fn block_json(
     action: &str,
     category: Option<&str>,
     severity: Option<&str>,
+    pid: Option<u32>,
+    comm: Option<&str>,
 ) -> String {
-    let mut s = String::with_capacity(160);
+    let mut s = String::with_capacity(200);
     s.push_str(r#"{"type":"BLOCK","source":""#);
     s.push_str(&json_escape(source));
     s.push_str(r#"","target":""#);
@@ -76,6 +78,17 @@ pub fn block_json(
     if let Some(sev) = severity {
         s.push_str(r#","severity":""#);
         s.push_str(&json_escape(sev));
+        s.push('"');
+    }
+    // Per-process attribution (Arsenal roadmap Phase 2 #8): when the blocked
+    // flow was correlated to the process that initiated the connect(), name it.
+    if let Some(p) = pid {
+        s.push_str(r#","pid":"#);
+        s.push_str(&p.to_string());
+    }
+    if let Some(c) = comm {
+        s.push_str(r#","comm":""#);
+        s.push_str(&json_escape(c));
         s.push('"');
     }
     s.push('}');
@@ -214,4 +227,45 @@ async fn handle_ws_client(ws: warp::ws::WebSocket, tx: Arc<Sender>) {
         }
     }
     inbound.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_json;
+
+    // The HUD parses `pid` / `comm` straight off the BLOCK message — pin the
+    // exact wire format so a refactor can't silently break attribution display.
+    #[test]
+    fn block_json_includes_attribution_when_present() {
+        let s = block_json(
+            "10.99.1.13",
+            "Edge Proxy",
+            Some("UNION SELECT"),
+            "XDP_DROP",
+            Some("SQLi"),
+            Some("critical"),
+            Some(4827),
+            Some("curl"),
+        );
+        assert!(s.contains(r#""pid":4827"#), "missing pid: {s}");
+        assert!(s.contains(r#""comm":"curl""#), "missing comm: {s}");
+    }
+
+    // A manual block (no originating connect observed) must omit both fields,
+    // not emit null/0 — the HUD keys its origin line on `pid` being truthy.
+    #[test]
+    fn block_json_omits_attribution_when_absent() {
+        let s = block_json(
+            "10.99.1.13",
+            "Edge Proxy",
+            None,
+            "XDP_DROP",
+            Some("Manual"),
+            Some("high"),
+            None,
+            None,
+        );
+        assert!(!s.contains("pid"), "pid leaked when absent: {s}");
+        assert!(!s.contains("comm"), "comm leaked when absent: {s}");
+    }
 }

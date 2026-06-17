@@ -436,7 +436,7 @@ export function useHakamData() {
               setLogs(prev => [{
                 id,
                 time: formatTime(),
-                message: `${category} (${severity}) blocked: ${data.payload ?? data.action} from ${data.source}`,
+                message: `${category} (${severity}) blocked: ${data.payload ?? data.action} from ${data.source}${data.pid ? ` · origin PID ${data.pid}/${data.comm}` : ''}`,
                 level: 'critical' as LogLevel,
                 role: fromRole,
                 category,

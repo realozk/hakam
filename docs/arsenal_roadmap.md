@@ -143,7 +143,7 @@ Update this as you ship each item. Phase numbers map to the tables above.
 | 1 | 5 — Uppercase assertion | ✅ | + length/empty/category-sync invariants |
 | 2 | 6 — BPF-LSM socket_connect | ⬜ | |
 | 2 | 7 — Tight eBPF conntrack | ⬜ | |
-| 2 | 8 — Per-process attribution in BLOCK | ⬜ | |
+| 2 | 8 — Per-process attribution in BLOCK | ✅ | connect_task records (dst_addr,dst_port)→(pid,comm); payload_task correlates on a BLOCK and names origin in INTERCEPT line + BLOCK JSON; HUD log shows "origin PID/comm". Verified end-to-end on VM real traffic. Limitation: dst-keyed, most-recent-wins within 120s TTL — #7 conntrack tightens to source-port precision. |
 | 3 | 9 — systemd + container | ⬜ | |
 | 3 | 10 — Driver-mode XDP / real NIC | ⬜ | |
 | 3 | 11 — Small PCAP replay corpus | ⬜ | |

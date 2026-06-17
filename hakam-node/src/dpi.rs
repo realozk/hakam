@@ -20,6 +20,44 @@ use crate::{
 // linear scan over the flow table.
 const REASSEMBLY_GC_INTERVAL: u64 = 1024;
 
+// ── Per-process attribution (Arsenal roadmap Phase 2 #8) ────────────────────
+//
+// The sys_enter_connect tracepoint already gives us (pid, comm, dst_addr,
+// dst_port) for every outbound connect(). The DPI path, when it blocks a flow,
+// knows that flow's destination too. We bridge the two streams here: connect_task
+// records "process P initiated a connect to dst:port"; payload_task, on a BLOCK,
+// looks up the flow's destination to name the originating process.
+//
+// Keyed on (dst_addr, dst_port) — both network byte order, identical in
+// PayloadEvent and ConnectEvent, so no conversion is needed to match them.
+//
+// Honest limitation for Q&A: if two processes connect to the same dst:port
+// inside the TTL window, the most recent one wins — source-port-precise
+// attribution waits on the Phase 2 #7 eBPF conntrack.
+
+/// How long a connect()→process mapping stays valid for attributing a BLOCK.
+/// Matches the BLOCKLIST TTL so a blocked flow keeps its origin for its lifetime.
+const ATTRIBUTION_TTL_SECS: u64 = 120;
+/// Soft cap on the attribution table; stale entries are pruned past this size.
+const ATTRIBUTION_MAP_CAP: usize = 4096;
+
+/// What process initiated a connection, and when we observed it.
+#[derive(Clone)]
+pub struct Attribution {
+    pub pid: u32,
+    pub comm: String,
+    pub seen_ns: u64,
+}
+
+/// `(dst_addr, dst_port)` → originating process. Shared between `connect_task`
+/// (writer) and `payload_task` (reader).
+pub type AttributionMap = Arc<Mutex<HashMap<(u32, u16), Attribution>>>;
+
+/// Construct an empty attribution table for wiring the two tasks together.
+pub fn new_attribution_map() -> AttributionMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 #[derive(Default)]
 pub struct DpiStats {
     pub total_http_seen: u64,
@@ -41,6 +79,7 @@ pub async fn payload_task(
     blocklist: Arc<Mutex<LpmTrie<MapData, u32, u64>>>,
     tx: Sender,
     stats: Arc<Mutex<DpiStats>>,
+    attribution: AttributionMap,
 ) {
     let mut reassembler = Reassembler::with_defaults();
     let mut events_seen: u64 = 0;
@@ -95,6 +134,15 @@ pub async fn payload_task(
             let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
             let ip_str = ip.to_string();
 
+            // Correlate the blocked flow back to the process that opened it.
+            let origin = {
+                let map = attribution.lock().await;
+                let cutoff = now_ns.saturating_sub(ATTRIBUTION_TTL_SECS * 1_000_000_000);
+                map.get(&(event.dst_addr, event.dst_port)).and_then(|a| {
+                    (a.seen_ns >= cutoff).then(|| (a.pid, a.comm.clone()))
+                })
+            };
+
             println!();
             println!(
                 "  {}  {}  {}  {}  {}  {}",
@@ -110,6 +158,14 @@ pub async fn payload_task(
                 "   └─ pattern:".bright_black(),
                 sig.pattern.yellow(),
             );
+            if let Some((pid, comm)) = &origin {
+                println!(
+                    "  {}  {} {}",
+                    "   └─ origin: ".bright_black(),
+                    format!("PID {}", pid).bright_magenta().bold(),
+                    format!("/ {}", comm).bright_magenta(),
+                );
+            }
             println!();
 
             let trie_key = Key::new(32, u32::from_ne_bytes(ip.octets()));
@@ -121,6 +177,10 @@ pub async fn payload_task(
                 *s.by_category.entry(sig.category).or_insert(0) += 1;
             }
 
+            let (origin_pid, origin_comm) = match &origin {
+                Some((pid, comm)) => (Some(*pid), Some(comm.as_str())),
+                None => (None, None),
+            };
             let _ = tx.send(block_json(
                 &ip_str,
                 "Edge Proxy",
@@ -128,6 +188,8 @@ pub async fn payload_task(
                 sig.action,
                 Some(sig.category),
                 Some(sig.severity),
+                origin_pid,
+                origin_comm,
             ));
             let _ = tx.send(event_json(
                 &format!(
@@ -142,7 +204,11 @@ pub async fn payload_task(
     }
 }
 
-pub async fn connect_task(mut ring: AsyncFd<RingBuf<MapData>>, tx: Sender) {
+pub async fn connect_task(
+    mut ring: AsyncFd<RingBuf<MapData>>,
+    tx: Sender,
+    attribution: AttributionMap,
+) {
     loop {
         let mut guard = match ring.readable_mut().await {
             Ok(g) => g,
@@ -174,6 +240,21 @@ pub async fn connect_task(mut ring: AsyncFd<RingBuf<MapData>>, tx: Sender) {
                 port,
                 format!("(PID {})", ev.pid).bright_black()
             );
+
+            // Record who opened this connection so a later BLOCK on the same
+            // destination can name the originating process.
+            {
+                let now_ns = boot_time_ns();
+                let mut map = attribution.lock().await;
+                if map.len() >= ATTRIBUTION_MAP_CAP {
+                    let cutoff = now_ns.saturating_sub(ATTRIBUTION_TTL_SECS * 1_000_000_000);
+                    map.retain(|_, a| a.seen_ns >= cutoff);
+                }
+                map.insert(
+                    (ev.dst_addr, ev.dst_port),
+                    Attribution { pid: ev.pid, comm: comm.clone(), seen_ns: now_ns },
+                );
+            }
 
             let _ = tx.send(connect_json(ev.pid, &comm, &dst, port));
         }

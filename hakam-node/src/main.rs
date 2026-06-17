@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
     let (telemetry_tx, _) = broadcast::channel::<String>(512);
     let telemetry_tx = Arc::new(telemetry_tx);
     let dpi_stats = Arc::new(Mutex::new(DpiStats::default()));
+    let attribution = dpi::new_attribution_map();
 
     tokio::spawn({
         let tx = (*telemetry_tx).clone();
@@ -169,11 +170,13 @@ async fn main() -> Result<()> {
         Arc::clone(&blocklist),
         (*telemetry_tx).clone(),
         Arc::clone(&dpi_stats),
+        Arc::clone(&attribution),
     ));
 
     tokio::spawn(dpi::connect_task(
         AsyncFd::new(connect_ring).context("AsyncFd for CONNECT_EVENTS failed")?,
         (*telemetry_tx).clone(),
+        Arc::clone(&attribution),
     ));
 
     tokio::spawn(maintenance::ttl_sweep_task(
