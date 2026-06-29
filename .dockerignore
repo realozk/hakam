@@ -1,0 +1,7 @@
+# Keep the build context small and the eBPF build clean.
+target
+hakam-ui/node_modules
+hakam-ui/dist
+hakam-ui/src-tauri/target
+.git
+**/*.log
