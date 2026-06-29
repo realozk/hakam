@@ -98,7 +98,7 @@ Pre-stage health check: `./scripts/preflight.sh`
 Hakam is a signature-based inline DPI engine — not a WAF. Here's what it can't do:
 
 - **64-byte capture window per segment** — the eBPF sample is 64 bytes. Reassembly stitches segments together up to 256 bytes per flow, but bytes past that cap on a long flow are still invisible.
-- **In-order TCP only** — userspace reassembly appends segments in arrival order. Out-of-order delivery (rare on a healthy LAN, common over the wider internet) can break a split signature. The Phase 2 eBPF conntrack will fix this by exposing sequence numbers.
+- **Sampled-segment reassembly** — userspace reassembles segments in TCP sequence order (the kernel conntrack stamps each sampled segment's `seq`), so out-of-order delivery and retransmits are handled. The residual: only segments ≥64 B are sampled, so a payload split across a sub-64-byte segment leaves a hole, and sequence-number wraparound mid-flow isn't special-cased.
 - **ASCII case folding only** — the Aho-Corasick automaton folds A–Z ⇔ a–z, but Unicode homoglyphs and fullwidth characters are not normalised.
 - **Single-pass URL decoding** — `%XX` and `+` are decoded once as a fallback (so `UNION%20SELECT` and `UNION+SELECT` both match). Double-encoded payloads like `UNION%2520SELECT` are not recursively decoded.
 

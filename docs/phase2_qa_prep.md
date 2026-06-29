@@ -271,7 +271,7 @@ What we do claim: the bar to bypass is *root with eBPF tooling knowledge*, not *
 
 ### 30-second answer
 
-> *"The Phase 2 conntrack is an `LRU_HASH` map sized at load time — default 64k entries which is `64,000 × 32 bytes = ~2 MB`. At capacity the kernel evicts the least-recently-touched flow per CPU, so new flows always get a slot. The trade-off is that under sustained 1M-flow load (well above demo and realistic-enterprise rates), the eviction churn means flows can be dropped from the table mid-life — they keep working at the network layer but our per-flow state resets. We surface the eviction rate via a `STATS` counter; if you see it climbing, raise `--conntrack-size`. The hard ceiling is whatever your kernel will accept (typically 4M entries before the BPF verifier complains about memory)."*
+> *"The conntrack is a single `BPF_MAP_TYPE_LRU_HASH` — `CONNTRACK`, 65,536 entries at ~36 bytes each (12-byte 4-tuple key + 24-byte value), so ~2.3 MB resident, one shared table (not per-CPU). At capacity the kernel evicts the least-recently-used flow, so new flows always get a slot. The trade-off under sustained 1M-flow load (well above demo and realistic-enterprise rates) is eviction churn — flows can be pushed out of the table mid-life; they keep working at the network layer, our per-flow state just resets. We surface the live table size as `active_flows` in `stats` and the HUD. The size is a compile-time constant today (raising it is a recompile, not a flag — a runtime knob is post-Arsenal)."*
 
 ### Why this matters
 
@@ -279,31 +279,28 @@ Map exhaustion is the question every conntrack reviewer asks because nf_conntrac
 
 ### What we actually use
 
-For the Phase 2 #7 "tight scope" conntrack, the map type is:
+For the Phase 2 #7 "tight scope" conntrack, the map as shipped is:
 
 ```rust
-// hakam-ebpf/src/main.rs (planned)
+// hakam-ebpf/src/main.rs
 #[map]
-pub static FLOW_TABLE: LruHashMap<FlowKey, FlowState> =
+pub static CONNTRACK: LruHashMap<FlowKey, FlowState> =
     LruHashMap::<FlowKey, FlowState>::with_max_entries(65_536, 0);
 ```
 
-Key layout (12 bytes): `src_addr (4) + dst_addr (4) + src_port (2) + dst_port (2)`. Wire byte order.
+Key (`FlowKey`, 12 bytes, padding-free): `src_addr (4) + dst_addr (4) + src_port (2) + dst_port (2)`, wire byte order.
 
-Value layout (20 bytes), per the `FlowState` in `hakam-node/src/reassembly.rs` that the conntrack will populate:
+Value (`FlowState`, 24 bytes, u64-first so no internal padding hole) — **no TCP state machine**:
 
 ```
-seq_next   : u32   (4) — expected next TCP seq
-dir        : u8    (1) — 0 = c2s, 1 = s2c
-_pad       : u8    (1)
-last_ts    : u32   (4) — boot-time seconds of last segment
-flags      : u16   (2) — SYN_SENT / ESTABLISHED / FIN_WAIT_*
-_pad2      : u16   (2)
-bytes_seen : u32   (4)
-_reserved  : u32   (2)  (room for what we discover we need)
+last_ts   : u64   (8) — bpf_ktime_get_ns of last segment (LRU/TTL)
+seq_next  : u32   (4) — next expected TCP seq (advanced forward-only)
+packets   : u32   (4) — per-flow counter (stats / optional per-flow limit)
+dir       : u8    (1) — 0 = first-seen direction
+_pad      : [u8;7] (7)
 ```
 
-Total: 32 bytes per entry counting alignment. At 64k entries: 2 MB resident, per CPU on a `LruPerCpuHashMap`, total ~`2 MB × num_cpus`. On a 16-core machine that's 32 MB — small compared to nf_conntrack's typical ~256 MB.
+~36 bytes of key+value per entry. At 65,536 entries: **~2.3 MB resident, one shared table** (`LruHashMap`, not per-CPU — so no `× num_cpus` multiplier). Small compared to nf_conntrack's typical ~256 MB.
 
 ### Eviction semantics, in detail
 
@@ -315,15 +312,13 @@ Total: 32 bytes per entry counting alignment. At 64k entries: 2 MB resident, per
 
 This is O(1) amortised. The only failure mode is when the LRU list scan can't find an eviction candidate — happens if every entry was touched in the same RCU window. In that case the insert returns `-E2BIG` and we drop the new flow (kernel netdev counter increments).
 
-Our userspace surfaces this in `stats`:
+Our userspace surfaces the live table size in `stats` and the HUD METRICS feed:
 
 ```
-conntrack flows       : 8,432 / 65,536  (12.9%)
-conntrack evictions   : 0
-conntrack insert fail : 0
+active flows          : 8,432
 ```
 
-(All counters live in `PerCpuArray<u64>` cells, summed across CPUs in userspace.)
+`active_flows` is counted by iterating the `CONNTRACK` keys once per second (approximate under concurrent kernel writes, which is fine for a gauge). A dedicated eviction/insert-fail counter is **not** wired today — the gauge is what ships.
 
 ### What "1M flows" actually looks like
 
@@ -336,19 +331,21 @@ The reviewer's framing assumes a DDoS or a busy CDN. Realistic numbers:
 
 64k entries cover the first three. For the fourth, the operator has two options:
 
-1. **Raise the cap.** `--conntrack-size 1048576` packs the map at 1M entries × 32 bytes × 16 CPUs = ~512 MB. Verifier accepts up to about 4M entries before complaining; we cap at 2M in the CLI parser.
-2. **Accept the eviction churn.** LRU means the new flows still get a slot — they just may push our oldest tracked flows out. For Hakam's threat model (we care about *new* outbound connections, not long-lived ones), this is the right trade-off.
+1. **Raise the cap.** Bump `with_max_entries` and recompile — 1M entries × ~36 bytes ≈ 36 MB for one shared table. The verifier accepts well past 1M before memory complaints. (A runtime `--conntrack-size` flag is post-Arsenal; today it's a compile-time constant.)
+2. **Accept the eviction churn.** LRU means new flows still get a slot — they just push our oldest tracked flows out. For Hakam's threat model (we care about *new* connections and the reassembly of *active* ones, not long-lived idle flows), this is the right trade-off.
 
 ### What we *don't* do
 
 - **No per-IP rate limit on conntrack inserts.** The XDP rate limiter (already shipped) acts before conntrack would even fire. If a single IP is doing 500+ pps, it's already on the blocklist and isn't reaching the flow table.
 - **No `nf_conntrack` integration.** We don't share state with the kernel's netfilter conntrack. Two reasons: (a) we want to demo on boxes where nf_conntrack isn't loaded; (b) coupling our verifier-checked map to a netfilter subsystem with its own CVE history is a regression in attack surface.
-- **No flow timeout knobs.** TCP states have implicit timeouts — ESTABLISHED flows get evicted when LRU pressure hits, which is enough. We're not building a full TCP state machine in BPF.
+- **No flow timeout knobs and no TCP state machine.** `FlowState` carries no SYN/ESTABLISHED/FIN state — any TCP segment with a payload updates the flow, and idle flows are reclaimed by LRU pressure (kernel `CONNTRACK`) and a 30 s TTL sweep (the userspace reassembly buffer). That's deliberate: a full BPF state machine is verifier-expensive and outside the tight-scope mandate.
+
+- **No per-flow rate limit (per-IP kept).** The roadmap floated "per-flow rate limit instead of per-IP." We kept the existing per-IP XDP limiter and did *not* replace it — per-flow-only is weaker against one source opening many short flows (each stays under a per-flow budget). The per-flow `packets` counter is exposed for visibility, not enforcement.
 
 ### Follow-ups
 
 > **"What if my workload is mostly UDP?"**
-> Out of scope for Phase 2. The map keys on the 4-tuple regardless of protocol but the state machine assumes TCP. UDP flows would get entries but no useful tracking. We'd need a separate UDP conntrack — post-Arsenal.
+> UDP never enters the table. XDP only records a flow inside the TCP path (conntrack observation sits next to the TCP payload sampling), so `CONNTRACK` is TCP-only by construction. A separate UDP conntrack is post-Arsenal.
 
 > **"How does this compare to Cilium's conntrack?"**
 > Cilium uses two LRU maps (`cilium_ct4_global`, `cilium_ct_any4_global`) sized at compile time per node based on policy. Same primitive, same eviction. They size at 1M as a default for K8s clusters. We're smaller because our scope is one host, not a cluster.
@@ -357,10 +354,10 @@ The reviewer's framing assumes a DDoS or a busy CDN. Realistic numbers:
 > Out of scope for Phase 2 — the FlowKey is IPv4-only (12 bytes). IPv6 would need a 36-byte key (16+16+2+2). Different map. Post-Arsenal.
 
 > **"Memory budget?"**
-> 32 bytes × 64k entries × 16 CPUs = ~32 MB at default. 32 bytes × 1M × 16 CPUs = ~512 MB at max. Operator knob makes the trade-off explicit.
+> ~36 bytes × 65,536 entries ≈ 2.3 MB at default (one shared table — no per-CPU multiplier). Recompiled to 1M entries ≈ 36 MB. Far below nf_conntrack's typical footprint.
 
 > **"Can I see the per-flow state?"**
-> Yes — `bpftool map dump name FLOW_TABLE` walks the entries. We expose a `flows` CLI command that does this prettier.
+> Yes — `bpftool map dump name CONNTRACK` walks the entries. The `stats` command surfaces the live count as `active_flows` (a per-flow pretty-printer is post-Arsenal).
 
 ---
 
@@ -370,7 +367,7 @@ The reviewer's framing assumes a DDoS or a busy CDN. Realistic numbers:
 
 ### 30-second answer
 
-> *"Today, in-order TCP delivery is solid — we buffer up to 256 bytes per 4-tuple flow and run the matcher over the reassembled view. Out-of-order delivery breaks us because we don't track TCP sequence numbers yet — the Phase 2 #7 conntrack adds `seq_next` to `FlowState` and at that point we can dedupe retransmits and reorder. Path MTU changes, TCP fast open, TLS-encrypted payloads, and TSO-merged segments all behave correctly today because we operate on whatever the kernel hands XDP — TSO/GRO actually helps us by pre-merging segments before sampling. The honest gap is segment-after-256-bytes — for very long URIs split across more than four segments, the tail is invisible."*
+> *"Both in-order and out-of-order TCP are solid now. The kernel stamps each sampled segment's TCP sequence number on the ring event; userspace keeps the flow's segments in a map keyed by sequence and rebuilds the matched view in sequence order — so the 'send the second half first' evasion reassembles correctly, and retransmits (a sequence we already hold) are deduped. Path MTU changes, TCP fast open, TLS-encrypted payloads, and TSO-merged segments all behave correctly because we operate on whatever the kernel hands XDP — TSO/GRO actually helps by pre-merging segments before sampling. The honest residual gaps are two: the 64-byte sample window (a payload split across a sub-64-byte segment we never sampled leaves a hole), and sequence-number wraparound mid-flow, which we order by raw u32 and don't special-case — astronomically unlikely inside a ≤256-byte window."*
 
 ### Why this matters
 
@@ -389,14 +386,15 @@ This is the question the kernel-networking person in the audience will ask, beca
 | **TCP Fast Open (payload in SYN)** | Sampled normally | We don't care about SYN/ACK flags, just that there's a TCP payload. |
 | **Connection RST** | TTL eviction cleans up | 30s TTL on the flow state; an RST just means we won't see more segments, GC takes care of it. |
 | **TLS-encrypted payloads** | No match fires | We do not decrypt. Encrypted bytes don't match any signature; the flow eventually GC's. Correct behaviour. |
+| **Out-of-order delivery** (seg N+1 before seg N) | Reassembled in sequence order | Segments stored in a `BTreeMap` keyed by `seq`; view rebuilt in sequence order. `out_of_order_segments_reassemble_in_seq_order` + `tests/reassembly.rs::reordered_split_still_matches` pin this. |
+| **TCP retransmits** (sequence already held) | Dropped, not appended | A segment whose `seq` is already in the flow map is a duplicate (sampled payloads are fixed-width) and is skipped. `retransmit_is_dropped` test. |
 
-### Cases we get wrong today (documented, planned for Phase 2 #7)
+### Cases we still get wrong today (documented residuals)
 
-| Case | Failure mode | Phase 2 #7 fix |
-|------|--------------|----------------|
-| **Out-of-order delivery** (seg N+1 arrives before seg N) | View buffer is appended in arrival order; the HTTP method gate fails on the second-segment-first view | `seq_next` in FlowState lets us hold seg N+1 in a small reorder slot until seg N lands, then concatenate in correct order. |
-| **TCP retransmits** (same seq, later in time) | Buffer gets a duplicate of an earlier payload appended; substring match still fires (harmless) but buffer fills 2× faster | `seq_next` lets us identify retransmits and skip them. |
-| **Sequence number wrap** (4 GB into a long-lived flow) | A retransmit dedupe based on raw `seq_next` would misidentify wraps as out-of-order | Wrap detection needs the standard `seq1 - seq2 < 2^31` arithmetic. Documented in the Phase 2 #7 spec. |
+| Case | Failure mode | Note |
+|------|--------------|------|
+| **Sequence-number wrap** (mid-flow crossing 2^32) | Segments ordered by raw `u32` seq would order once-scrambled across the wrap | Not special-cased. Astronomically unlikely inside a ≤256-byte buffer window; documented, not handled. Proper fix is `(a - b) as i32` wrap arithmetic on the BTreeMap key. |
+| **Sub-64-byte split segment** | A segment under the 64-byte sample window isn't sampled, so a payload split across it leaves a hole in the reassembled view | Inherent to the sampling design; widening the window is a separate trade-off. |
 | **Long URI past 256 bytes** | Anything beyond byte 256 of the reassembled view is invisible | Raise `DEFAULT_MAX_FLOW_BUF` if needed (memory cost: linear). 256 is the demo default; production might want 1024. |
 
 ### Cases the reviewer might think we get wrong but we actually don't
@@ -421,8 +419,8 @@ This is the question the kernel-networking person in the audience will ask, beca
 
 ### Follow-ups
 
-> **"How do you know your seq_next math is right?"**
-> When Phase 2 #7 lands, we'll add unit tests for: in-order N→N+1 (concatenate), reorder N+1→N (hold N+1 until N), retransmit of N (skip), wrap from `0xFFFFFFF0` to `0x00000010` (concatenate, not reorder). The tests live in `hakam-node/tests/reassembly.rs`.
+> **"How do you know your sequence ordering is right?"**
+> Unit + integration tests pin it: in-order concatenate, out-of-order reassembly (`out_of_order_segments_reassemble_in_seq_order`), retransmit drop (`retransmit_is_dropped`), and an end-to-end reordered split that the kernel even mislabels as a retransmit but sequence ordering still recovers (`tests/reassembly.rs::reordered_split_still_matches`). Sequence-wrap is the one case we document as unhandled rather than test.
 
 > **"What's the worst case for an attacker to slip past?"**
 > A request larger than 256 bytes that places its only attack token in the trailing portion. Mitigations: raise the buffer cap (memory cost), or rely on the upstream server having its own request limit.
@@ -515,5 +513,5 @@ The exact script will live alongside the demo materials. This appendix exists so
 
 - This is **prep for hostile Q&A** about Phase 2. It is not a security audit, a threat model document, or a customer-facing claim. None of the answers here should be lifted into marketing copy.
 - The "30-second answer" paragraphs are **rehearsal targets**, not exact transcripts. Internalise the structure, deliver in your own voice.
-- Numbers in §4 (memory, throughput) are **estimates from spec, not measurements**. When Phase 2 #7 lands and we measure them on the demo box, update those numbers here with a note pointing at the bench rig.
+- Numbers in §4 (memory, throughput) are **calculated from the shipped map layout, not benchmarked**. The map type, sizes, and `FlowState` layout are now real (Phase 2 #7 landed); the memory figures are arithmetic on those, and resident/throughput on the demo box still want a measurement pass — update here with a note pointing at the bench rig when measured.
 - The bypass enumeration in §3 is the **set we know about as of 2026-05-31**. Any reviewer who shows us a new one — buy them a drink, then add it here.

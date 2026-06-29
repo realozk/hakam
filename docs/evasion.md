@@ -57,8 +57,8 @@ The matcher runs once on the raw bytes, then once more on a single-pass URL-deco
 ### 2. 64-byte capture window
 The eBPF program samples only the first 64 bytes of each TCP segment. Attacks that begin after byte 64 — via long path prefixes or in POST bodies — are invisible to the inspector. For a typical `GET /?payload=...`, the payload starts around byte 6, leaving 58 bytes of usable inspection window.
 
-### 3. Userspace reassembly, in-order only
-Userspace stitches segments from the same 4-tuple flow (`src_addr`, `src_port`, `dst_addr`, `dst_port`) into a per-flow buffer capped at 256 bytes, so the split-attack evasion is closed for in-order delivery. **Gap:** without TCP sequence numbers we cannot reorder or dedupe retransmits — the Phase 2 eBPF conntrack will expose `seq_next` so the `FlowState` struct can pick up reordering for free.
+### 3. Userspace reassembly — sequence-ordered (Phase 2 #7)
+Userspace stitches segments from the same 4-tuple flow (`src_addr`, `src_port`, `dst_addr`, `dst_port`) into a per-flow buffer capped at 256 bytes, ordered by **TCP sequence number** (the kernel stamps each sampled segment's `seq`). The split-attack evasion is therefore closed for **both in-order and out-of-order delivery**, and retransmits are deduped by sequence. **Residual gaps:** (a) only sampled segments participate — a payload split across a sub-64-byte segment (which isn't sampled) leaves a hole; (b) sequence-number wraparound mid-flow is not handled (segments are ordered by raw `u32` seq — astronomically unlikely within a ≤256-byte window, documented not handled).
 
 ### 4. ASCII case-insensitive only
 The Aho-Corasick automaton folds ASCII case (A–Z ⇔ a–z). Unicode homoglyphs, fullwidth characters, and HTML/XML entities are not normalised, so any attack using them passes undetected.
