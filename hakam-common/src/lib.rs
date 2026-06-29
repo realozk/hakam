@@ -34,6 +34,43 @@ pub struct ConnectEvent {
     pub _pad:     u16,
 }
 
+/// 4-tuple identifying a TCP flow (Arsenal roadmap Phase 2 #7 — eBPF conntrack).
+///
+/// Used as the kernel `CONNTRACK` LRU-hash map key and, in std builds, as a
+/// userspace `HashMap` key. Every field holds the on-wire bytes (network byte
+/// order) exactly as loaded from the packet headers — no host-order conversion —
+/// so the same flow always produces the same key on both sides. The layout is
+/// padding-free (12 bytes, 4-aligned), which matters for a BPF map key: the
+/// kernel hashes the raw key bytes, so an uninitialised padding hole would break
+/// lookups.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlowKey {
+    pub src_addr: u32,
+    pub dst_addr: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+/// Per-flow conntrack state held in the kernel `CONNTRACK` map value slot.
+///
+/// Deliberately small and linear to write — no TCP state machine. `seq_next` is
+/// the next expected sequence number (last seq + on-wire payload length) used
+/// for retransmit/ordering classification; `last_ts` is the boot-time ns of the
+/// most recent segment (LRU/TTL); `packets` is a per-flow counter for stats and
+/// optional per-flow limiting; `dir` records the first-seen direction
+/// (0 = initiator→responder). Field order puts the u64 first so the struct has
+/// no internal padding hole (24 bytes, 8-aligned).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FlowState {
+    pub last_ts:  u64,
+    pub seq_next: u32,
+    pub packets:  u32,
+    pub dir:      u8,
+    pub _pad:     [u8; 7],
+}
+
 /// Shared IPv4 newtype that compiles in both no_std (kernel) and std (userspace).
 /// Internal u32 is stored in big-endian (network) byte order.
 #[repr(C)]
@@ -164,6 +201,24 @@ mod tests {
             // + 4 (payload_len) + PAYLOAD_LEN = 16 + PAYLOAD_LEN.
             assert_eq!(core::mem::size_of::<PayloadEvent>(), 16 + PAYLOAD_LEN);
             assert_eq!(core::mem::align_of::<PayloadEvent>(), 4);
+        }
+
+        #[test]
+        fn test_flow_key_layout() {
+            use super::super::FlowKey;
+            // 4 (src_addr) + 4 (dst_addr) + 2 (src_port) + 2 (dst_port) = 12,
+            // and it MUST be padding-free — it's a BPF map key, hashed by raw bytes.
+            assert_eq!(core::mem::size_of::<FlowKey>(), 12);
+            assert_eq!(core::mem::align_of::<FlowKey>(), 4);
+        }
+
+        #[test]
+        fn test_flow_state_layout() {
+            use super::super::FlowState;
+            // 8 (last_ts) + 4 (seq_next) + 4 (packets) + 1 (dir) + 7 (_pad) = 24,
+            // u64 first → no internal padding hole.
+            assert_eq!(core::mem::size_of::<FlowState>(), 24);
+            assert_eq!(core::mem::align_of::<FlowState>(), 8);
         }
     }
 }

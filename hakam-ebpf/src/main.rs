@@ -3,9 +3,10 @@
 
 use aya_ebpf::{
     macros::{classifier, lsm, map, tracepoint, xdp},
-    maps::{Array, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf},
+    maps::{Array, LpmTrie, LruHashMap, LruPerCpuHashMap, PerCpuArray, RingBuf},
     programs::{LsmContext, TcContext, TracePointContext, XdpContext},
 };
+use hakam_common::{FlowKey, FlowState};
 
 mod helpers;
 mod lsm;
@@ -46,6 +47,16 @@ pub static BLOCKLIST: LpmTrie<u32, u64> = LpmTrie::<u32, u64>::with_max_entries(
 // syscall before any packet is created. Userspace-managed via `policy-block`.
 #[map]
 pub static CONNECT_POLICY: LpmTrie<u32, u64> = LpmTrie::<u32, u64>::with_max_entries(1024, 0);
+
+// Tight-scope eBPF conntrack (Arsenal roadmap Phase 2 #7). Per-flow state keyed
+// on the 4-tuple, holding seq_next/last_ts/packets/dir. No TCP state machine —
+// any TCP segment with a payload updates the flow. LruHashMap so the kernel
+// auto-evicts the least-recently-used flow under capacity pressure (the answer
+// to "1M flows = 1M entries, what's the eviction policy"). XDP populates it;
+// userspace reads flow_count for `stats`.
+#[map]
+pub static CONNTRACK: LruHashMap<FlowKey, FlowState> =
+    LruHashMap::<FlowKey, FlowState>::with_max_entries(65_536, 0);
 
 // LruPerCpuHashMap: each CPU has its own counter slot for each key (race-free
 // without atomics); kernel auto-evicts the oldest entry on capacity hit so a
