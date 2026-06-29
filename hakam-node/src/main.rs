@@ -16,7 +16,10 @@ mod metrics;
 mod telemetry;
 
 #[cfg(feature = "linux")]
-use std::sync::Arc;
+use std::{
+    io::{self, IsTerminal},
+    sync::Arc,
+};
 
 #[cfg(feature = "linux")]
 use anyhow::{bail, Context, Result};
@@ -241,15 +244,31 @@ async fn main() -> Result<()> {
         bpf_path: Arc::new(bpf_path),
     };
 
-    let stdin_task = task::spawn_blocking(move || cli::run_stdin_loop(ctx));
-
-    tokio::select! {
-        res = stdin_task => {
-            if let Ok(Err(e)) = res {
-                error!("CLI error: {}", e);
+    // With a controlling terminal, run the interactive CLI on a blocking thread.
+    // Headless (container, systemd, piped stdin) there is no TTY: the line reader
+    // would hit EOF immediately and exit, so we skip it entirely and just wait for
+    // a shutdown signal — the datapath, telemetry, and WS server keep running and
+    // the node is driven over the WebSocket feed and signals. No parked blocking
+    // thread, so SIGINT detaches and exits cleanly.
+    if io::stdin().is_terminal() {
+        let stdin_task = task::spawn_blocking(move || cli::run_stdin_loop(ctx));
+        tokio::select! {
+            res = stdin_task => {
+                if let Ok(Err(e)) = res {
+                    error!("CLI error: {}", e);
+                }
             }
+            _ = &mut shutdown_rx => {}
         }
-        _ = &mut shutdown_rx => {}
+    } else {
+        let _ = ctx; // CLI commands are unavailable without a TTY.
+        println!(
+            "\n  {}  {} {}\n",
+            "◉".bright_blue().bold(),
+            "headless".bright_blue().bold(),
+            "— no TTY; datapath live, control via WS + SIGINT to stop".bright_black(),
+        );
+        let _ = shutdown_rx.await;
     }
 
     info!("All hooks detached from '{}'. Goodbye.", &args.iface);
