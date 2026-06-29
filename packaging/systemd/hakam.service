@@ -1,0 +1,42 @@
+[Unit]
+Description=Hakam — kernel-resident eBPF firewall (XDP + TC + BPF-LSM)
+Documentation=https://github.com/ozk/hakam
+# Interfaces must exist before we attach XDP/TC.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/hakam/hakam.env
+
+# Clear any stale hook from a previous run (the '-' prefix ignores failure when
+# there is nothing to clear). Mirrors what `cargo xtask run` does.
+ExecStartPre=-/sbin/ip link set dev ${HAKAM_IFACE} xdp off
+ExecStartPre=-/sbin/tc qdisc del dev ${HAKAM_IFACE} clsact
+
+ExecStart=/usr/local/bin/hakam-node \
+    --iface ${HAKAM_IFACE} \
+    --mode ${HAKAM_MODE} \
+    --bind ${HAKAM_BIND} \
+    --bpf-path ${HAKAM_BPF_PATH}
+
+# The node runs headless under systemd (no TTY) — it stays up and is driven over
+# the WebSocket feed. SIGINT is what it traps to detach every hook cleanly, so
+# stop with SIGINT (not the default SIGTERM, which would skip clean detach).
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+Restart=on-failure
+RestartSec=2
+
+# eBPF (XDP/TC) and especially the BPF-LSM load want broad privilege; running as
+# root is the most reliable across kernels and the simplest for a reviewer.
+# Hardened alternative (drop User=root, run as a dedicated user):
+#   User=hakam
+#   AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_PERFMON
+#   CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_PERFMON
+# Some kernels still require CAP_SYS_ADMIN for the LSM attach, so test before
+# locking down.
+
+[Install]
+WantedBy=multi-user.target
