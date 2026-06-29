@@ -107,7 +107,7 @@ pub async fn payload_task(
             }
 
             let key = FlowKey::from_event(event);
-            let Some(view) = reassembler.ingest(key, payload, now_ns) else {
+            let Some(view) = reassembler.ingest(key, payload, event.seq, event.flags, now_ns) else {
                 continue;
             };
 
