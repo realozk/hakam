@@ -6,7 +6,7 @@
 //! carries `FLOW_IN_ORDER`; the dedupe/gap behaviour is unit-tested in
 //! `src/reassembly.rs`.
 
-use hakam_common::FLOW_IN_ORDER;
+use hakam_common::{FLOW_IN_ORDER, FLOW_RETRANSMIT};
 use hakam_node::reassembly::{FlowKey, Reassembler};
 use hakam_node::signatures::match_payload;
 
@@ -46,6 +46,24 @@ fn split_across_three_segments() {
     let _ = r.ingest(k, b"UN", 8, FLOW_IN_ORDER, 0);
     let v: Vec<u8> = r.ingest(k, b"ION SELECT 1 HTTP/1.1", 10, FLOW_IN_ORDER, 0).unwrap().to_vec();
     let sig = match_payload(&v).expect("three-segment reassembly must match");
+    assert_eq!(sig.category, "SQLi");
+}
+
+#[test]
+fn reordered_split_still_matches() {
+    // The classic evasion: send the second half of the attack first, the first
+    // half second. The kernel mislabels the late earlier segment as a
+    // retransmit (it sits behind the expected sequence), but userspace orders
+    // by sequence number and recovers the intact payload.
+    let mut r = Reassembler::with_defaults();
+    let k = key(40010);
+
+    let _ = r.ingest(k, b"ON SELECT 1 HTTP/1.1", 11, FLOW_IN_ORDER, 0);
+    let v: Vec<u8> = r
+        .ingest(k, b"GET /?q=UNI", 0, FLOW_RETRANSMIT, 0)
+        .unwrap()
+        .to_vec();
+    let sig = match_payload(&v).expect("reordered reassembly must match SQLi");
     assert_eq!(sig.category, "SQLi");
 }
 

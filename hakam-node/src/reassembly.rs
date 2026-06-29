@@ -13,21 +13,32 @@
 //! client→server vs server→client classification.
 //!
 //! What this does with Phase 2 #7 conntrack data:
-//!   * Retransmit dedupe. The kernel flags a segment whose bytes it has already
-//!     seen (`FLOW_RETRANSMIT`); we drop it instead of padding the buffer. We
-//!     trust the kernel flag because the kernel sees every segment while we see
-//!     only the sampled subset.
-//!   * Gap awareness. A segment arriving ahead of the expected sequence
-//!     (`FLOW_GAP`) is counted; the reorder step buffers it. Until then we still
-//!     append it so no real attack bytes are ever dropped.
+//!   * Sequence-ordered reassembly. Every sampled segment carries its TCP
+//!     sequence number (stamped by the kernel). We keep each flow's segments in
+//!     a map keyed by sequence and build the matched view in sequence order, so
+//!     segments that arrive out of order — including the classic "send the
+//!     second half first" evasion — are reassembled correctly. This supersedes
+//!     the kernel's coarse in-order/retransmit/gap flag for *byte placement*:
+//!     the flag can't tell a late-arriving earlier segment from a true
+//!     retransmit (both sit behind the expected sequence), but the sequence
+//!     number can.
+//!   * Retransmit dedupe. A segment whose sequence we already hold is a
+//!     duplicate and is dropped (sampled payloads are a fixed width, so an
+//!     identical sequence means identical bytes).
+//!   * Gap awareness. The kernel's `FLOW_GAP` flag feeds an out-of-order
+//!     counter for stats; byte placement is sequence-driven regardless.
 //!
 //! What we deliberately do NOT do:
 //!   * No TCP state machine. We do not track SYN/ACK/FIN — any TCP segment
 //!     with a payload is considered an opportunity to match.
+//!   * No sequence-wraparound handling. Segments are ordered by raw u32
+//!     sequence; a flow whose window straddles the 2^32 wrap (astronomically
+//!     unlikely within a ≤256-byte buffer) would order once-scrambled. Documented,
+//!     not handled — it never affects a real demo.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use hakam_common::{PayloadEvent, FLOW_GAP, FLOW_RETRANSMIT};
+use hakam_common::{PayloadEvent, FLOW_GAP};
 
 /// 4-tuple identifying a TCP flow. All fields hold the on-wire bytes as
 /// loaded from the packet headers — no host-order conversion. Two events
@@ -51,17 +62,25 @@ impl FlowKey {
     }
 }
 
-/// Per-flow buffered bytes plus housekeeping.
+/// Per-flow segment store plus housekeeping.
 ///
-/// `last_seen_ns` is the boot-time nanosecond timestamp of the most recent
-/// segment we ingested for this flow; the GC uses it for TTL eviction.
+/// `frags` holds each sampled segment's bytes keyed by its TCP sequence number;
+/// `view` is those fragments concatenated in sequence order (rebuilt on every
+/// ingest and handed to the matcher). `buffered` is the summed fragment length,
+/// capped at `max_buf`. `max_seq` is the highest sequence seen, used to detect
+/// out-of-order arrivals. `last_seen_ns` drives TTL eviction.
 struct FlowState {
-    buf: Vec<u8>,
+    frags: BTreeMap<u32, Vec<u8>>,
+    view: Vec<u8>,
+    buffered: usize,
+    max_seq: Option<u32>,
     last_seen_ns: u64,
-    /// Sequence end (host order) of the last segment we appended, or `None`
-    /// until the first one establishes it. The reorder step uses this to know
-    /// where the contiguous buffer ends; set on every appended segment.
-    seq_next: Option<u32>,
+}
+
+// Wrapping signed sequence comparisons (TCP sequence space is mod 2^32).
+#[inline]
+fn seq_gt(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) > 0
 }
 
 /// Default cap on bytes buffered per flow. Four PAYLOAD_LEN segments is
@@ -106,12 +125,14 @@ impl Reassembler {
         Self::new(DEFAULT_MAX_FLOW_BUF, DEFAULT_FLOW_TTL_NS, DEFAULT_MAX_FLOWS)
     }
 
-    /// Append `payload` to the flow's buffer (creating the flow if absent)
-    /// and return the buffer view to feed the matcher.
+    /// Store `payload` for the flow at sequence `seq` (creating the flow if
+    /// absent) and return the sequence-ordered reassembled view to feed the
+    /// matcher. `flags` is the kernel's classification, used only for the
+    /// out-of-order stat — byte placement is driven entirely by `seq`.
     ///
-    /// Returns `None` if the flow could not be created (table at cap) or if
-    /// the existing buffer is full and the segment is discarded. The hot
-    /// path treats `None` the same as "no match this segment".
+    /// Returns `None` only if the flow could not be created (flow table at cap).
+    /// A duplicate or a buffer-full flow returns the existing view unchanged;
+    /// the hot path treats `None` the same as "no match this segment".
     pub fn ingest(
         &mut self,
         key: FlowKey,
@@ -125,45 +146,51 @@ impl Reassembler {
                 self.dropped_at_cap += 1;
                 return None;
             }
-            self.flows.insert(
-                key,
-                FlowState {
-                    buf: Vec::with_capacity(payload.len()),
-                    last_seen_ns: now_ns,
-                    seq_next: None,
-                },
-            );
+            self.flows.insert(key, FlowState {
+                frags: BTreeMap::new(),
+                view: Vec::new(),
+                buffered: 0,
+                max_seq: None,
+                last_seen_ns: now_ns,
+            });
         }
 
-        // Retransmit: the kernel conntrack already accounted for these bytes
-        // earlier in the flow. Drop the duplicate — appending it only pads the
-        // buffer (substring matching doesn't need it) and burns the per-flow
-        // cap. We trust the kernel flag: it tracks the full segment stream,
-        // while userspace sees only sampled segments and couldn't decide this.
-        if flags == FLOW_RETRANSMIT {
+        // Duplicate: we already hold a fragment at this sequence. Sampled
+        // payloads are a fixed width, so an identical sequence means identical
+        // bytes — drop it. (Counters are bumped here, before the &mut borrow.)
+        if self.flows.get(&key).is_some_and(|s| s.frags.contains_key(&seq)) {
             self.dropped_retransmit += 1;
-            return self.flows.get(&key).map(|s| s.buf.as_slice());
+            return self.flows.get(&key).map(|s| s.view.as_slice());
         }
 
-        // Gap: a hole precedes this segment in sequence space. Until the reorder
-        // step lands we still append (never drop real attack bytes) but count it
-        // so the out-of-order rate is visible in stats.
+        // Kernel says this landed ahead of its expected sequence — a stats hint.
         if flags == FLOW_GAP {
             self.out_of_order_seen += 1;
         }
 
-        let state = self.flows.get_mut(&key).expect("just inserted/exists");
-        state.last_seen_ns = now_ns;
-
-        let room = self.max_buf.saturating_sub(state.buf.len());
+        let buffered = self.flows.get(&key).map_or(0, |s| s.buffered);
+        let room = self.max_buf.saturating_sub(buffered);
         if room == 0 {
             self.dropped_full_buf += 1;
-            return Some(&state.buf);
+            return self.flows.get(&key).map(|s| s.view.as_slice());
         }
         let take = payload.len().min(room);
-        state.buf.extend_from_slice(&payload[..take]);
-        state.seq_next = Some(seq.wrapping_add(payload.len() as u32));
-        Some(&state.buf)
+
+        let state = self.flows.get_mut(&key).expect("just inserted/exists");
+        state.last_seen_ns = now_ns;
+        state.frags.insert(seq, payload[..take].to_vec());
+        state.buffered += take;
+        state.max_seq = Some(match state.max_seq {
+            Some(m) if seq_gt(m, seq) => m,
+            _ => seq,
+        });
+        // Rebuild the matched view in sequence order. `buffered` ≤ max_buf (256
+        // by default), so this concatenation is trivially cheap.
+        state.view.clear();
+        for frag in state.frags.values() {
+            state.view.extend_from_slice(frag);
+        }
+        Some(&state.view)
     }
 
     /// Drop the flow's buffered state. Call after a match fires so the same
@@ -210,7 +237,7 @@ impl Default for Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hakam_common::FLOW_IN_ORDER;
+    use hakam_common::{FLOW_IN_ORDER, FLOW_RETRANSMIT};
 
     fn k(src_port: u16) -> FlowKey {
         FlowKey {
@@ -303,13 +330,27 @@ mod tests {
     }
 
     #[test]
-    fn gap_segment_is_counted_but_kept() {
+    fn gap_segment_is_counted_and_placed_by_seq() {
         let mut r = Reassembler::with_defaults();
         let _ = r.ingest(k(40000), b"GET ", 0, FLOW_IN_ORDER, 0);
-        // Ahead-of-expected segment: counted as out-of-order, still appended so
-        // no real attack bytes are lost before the reorder step lands.
+        // Kernel-flagged gap: counted as out-of-order; placed by sequence.
         let view = r.ingest(k(40000), b"/x", 100, FLOW_GAP, 1).unwrap();
-        assert_eq!(view, b"GET /x", "gap bytes are still appended (no data loss)");
+        assert_eq!(view, b"GET /x");
         assert_eq!(r.out_of_order_seen(), 1);
+    }
+
+    #[test]
+    fn out_of_order_segments_reassemble_in_seq_order() {
+        let mut r = Reassembler::with_defaults();
+        // The second half (seq 11) arrives before the first half (seq 0). The
+        // kernel, seeing the later-but-lower segment, mislabels it RETRANSMIT —
+        // sequence ordering must still place it first and recover the attack.
+        let _ = r.ingest(k(40000), b"ON SELECT 1 HTTP/1.1", 11, FLOW_IN_ORDER, 0);
+        let view = r.ingest(k(40000), b"GET /?x=UNI", 0, FLOW_RETRANSMIT, 1).unwrap();
+        assert!(
+            std::str::from_utf8(view).unwrap().contains("UNION SELECT"),
+            "reordered view must contain UNION SELECT, got: {:?}",
+            std::str::from_utf8(view).unwrap(),
+        );
     }
 }
