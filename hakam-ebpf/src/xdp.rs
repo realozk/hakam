@@ -8,9 +8,10 @@ use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
 };
-use hakam_common::{PayloadEvent, PAYLOAD_LEN};
+use hakam_common::{FlowKey, PayloadEvent, PAYLOAD_LEN};
 
 use crate::{
+    conntrack,
     helpers::{increment_drop_counter, ptr_at, record_latency},
     BLOCKLIST, LAST_SEEN, PACKET_COUNTER, PAYLOAD_EVENTS, RATE_LIMIT, RING_OVERFLOW,
 };
@@ -90,13 +91,16 @@ fn sample_payload(ctx: &XdpContext, src_addr: u32, dst_addr: u32) {
     let data_end = ctx.data_end();
 
     let ihl_addr = data + EthHdr::LEN;
-    if ihl_addr + 1 > data_end {
+    // Need the IHL byte (offset 0) and the total-length field (offset 2..4) to
+    // size the on-wire payload for conntrack's seq accounting.
+    if ihl_addr + 4 > data_end {
         return;
     }
     let ip_hdr_len = (unsafe { *(ihl_addr as *const u8) } & 0x0f) as usize * 4;
     if ip_hdr_len < 20 {
         return;
     }
+    let ip_total_len = u16::from_be(unsafe { *((ihl_addr + 2) as *const u16) }) as usize;
 
     let tcp_hdr_start = data + EthHdr::LEN + ip_hdr_len;
     // Need the first 13 bytes of the TCP header: ports (0..4) and data offset (12..13).
@@ -111,6 +115,18 @@ fn sample_payload(ctx: &XdpContext, src_addr: u32, dst_addr: u32) {
     if tcp_hdr_len < 20 || tcp_hdr_len > 60 {
         return;
     }
+
+    // Record the flow in conntrack *before* the 64-byte sampling gate below, so
+    // every TCP segment updates the table even when its payload is too short to
+    // sample. seq is on-wire big-endian → convert to host order for arithmetic;
+    // wire_len is the true on-wire payload size (total − IP hdr − TCP hdr).
+    let seq = u32::from_be(unsafe { *((tcp_hdr_start + 4) as *const u32) });
+    let wire_len = ip_total_len.saturating_sub(ip_hdr_len + tcp_hdr_len) as u32;
+    conntrack::observe(
+        &FlowKey { src_addr, dst_addr, src_port, dst_port },
+        seq,
+        wire_len,
+    );
 
     let payload_start = tcp_hdr_start + tcp_hdr_len;
     if payload_start + PAYLOAD_LEN > data_end {

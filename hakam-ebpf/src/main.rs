@@ -8,6 +8,7 @@ use aya_ebpf::{
 };
 use hakam_common::{FlowKey, FlowState};
 
+mod conntrack;
 mod helpers;
 mod lsm;
 mod tc;
