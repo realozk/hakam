@@ -10,35 +10,49 @@
 //! shrinks `FlowState`. Keep this function linear.
 
 use aya_ebpf::helpers::bpf_ktime_get_ns;
-use hakam_common::{FlowKey, FlowState};
+use hakam_common::{FlowKey, FlowState, FLOW_GAP, FLOW_IN_ORDER, FLOW_RETRANSMIT};
 
 use crate::CONNTRACK;
 
-/// Record one TCP segment against its flow.
+/// Record one TCP segment against its flow and classify it.
 ///
 /// `seq` and `wire_len` are **host order** (the caller converts `seq` from the
 /// on-wire big-endian value and derives `wire_len` from the IP/TCP header
-/// lengths). On a first sighting we insert; otherwise we advance `seq_next` and
-/// bump the per-flow counter. This step only *populates* the table — classifying
-/// a segment as in-order / retransmit / gap and stamping the ring event is the
-/// next step (`seq-on-the-wire`).
+/// lengths). Returns the segment's classification (`FLOW_*`) relative to the
+/// flow's expected next sequence, computed *before* this segment advances it.
+/// The caller stamps the returned flag onto the ring event so userspace — which
+/// only sees sampled segments — gets the kernel's authoritative ordering view.
+///
+/// TCP sequence space is mod 2^32; comparisons use a wrapping subtraction cast
+/// to `i32` so wraparound is handled correctly. No TCP state machine — first
+/// sighting is in-order by definition.
 #[inline(always)]
-pub fn observe(key: &FlowKey, seq: u32, wire_len: u32) {
+pub fn observe(key: &FlowKey, seq: u32, wire_len: u32) -> u8 {
     let now = unsafe { bpf_ktime_get_ns() };
+    let new_end = seq.wrapping_add(wire_len);
 
     if let Some(st) = unsafe { CONNTRACK.get_ptr_mut(key) } {
+        let prev = unsafe { (*st).seq_next };
+        let flag = match seq.wrapping_sub(prev) as i32 {
+            0 => FLOW_IN_ORDER,
+            d if d < 0 => FLOW_RETRANSMIT, // seq is behind expected
+            _ => FLOW_GAP,                 // seq is ahead — a hole precedes it
+        };
         unsafe {
             (*st).last_ts = now;
             (*st).packets = (*st).packets.wrapping_add(1);
-            // Wrapping add: TCP sequence space is mod 2^32 by definition.
-            (*st).seq_next = seq.wrapping_add(wire_len);
+            // Only ever advance seq_next forward (to the furthest byte seen) —
+            // a retransmit must not drag the expected pointer backward.
+            if (new_end.wrapping_sub(prev) as i32) > 0 {
+                (*st).seq_next = new_end;
+            }
         }
-        return;
+        return flag;
     }
 
     let st = FlowState {
         last_ts: now,
-        seq_next: seq.wrapping_add(wire_len),
+        seq_next: new_end,
         packets: 1,
         dir: 0,
         _pad: [0; 7],
@@ -46,4 +60,5 @@ pub fn observe(key: &FlowKey, seq: u32, wire_len: u32) {
     // Best-effort: a full table just means the LRU evicts something. A failed
     // insert is never allowed to disturb the packet's XDP verdict.
     let _ = CONNTRACK.insert(key, &st, 0);
+    FLOW_IN_ORDER
 }

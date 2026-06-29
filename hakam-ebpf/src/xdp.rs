@@ -122,7 +122,7 @@ fn sample_payload(ctx: &XdpContext, src_addr: u32, dst_addr: u32) {
     // wire_len is the true on-wire payload size (total − IP hdr − TCP hdr).
     let seq = u32::from_be(unsafe { *((tcp_hdr_start + 4) as *const u32) });
     let wire_len = ip_total_len.saturating_sub(ip_hdr_len + tcp_hdr_len) as u32;
-    conntrack::observe(
+    let flow_flags = conntrack::observe(
         &FlowKey { src_addr, dst_addr, src_port, dst_port },
         seq,
         wire_len,
@@ -152,6 +152,11 @@ fn sample_payload(ctx: &XdpContext, src_addr: u32, dst_addr: u32) {
         (*ptr).src_port = src_port;
         (*ptr).dst_port = dst_port;
         (*ptr).payload_len = PAYLOAD_LEN as u32;
+        // seq is host order (already byte-swapped above); flags is the kernel's
+        // conntrack classification so userspace need not re-derive it.
+        (*ptr).seq = seq;
+        (*ptr).flags = flow_flags;
+        (*ptr)._pad = [0; 3];
         core::ptr::copy_nonoverlapping(
             payload_start as *const u8,
             (*ptr).payload.as_mut_ptr(),
