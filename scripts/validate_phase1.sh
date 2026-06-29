@@ -90,6 +90,10 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+# Ctrl-C should abort the whole script, not just the current probe's websocat.
+# Bash by default only delivers SIGINT to the foreground command of the
+# current job; without this trap the next `expect_block` starts immediately.
+trap 'printf "\n${YEL}interrupted${RST}\n"; exit 130' INT
 
 # ── prerequisites ────────────────────────────────────────────────────────────
 require() {
@@ -119,9 +123,27 @@ for ip in "${need_ips[@]}"; do
     fi
 done
 
+# Kill any stale hakam-node from a previous run or a manual `cargo xtask run`
+# in another terminal — otherwise it holds port 8080 and our launch can't bind.
+if pgrep -x hakam-node >/dev/null 2>&1; then
+    warn "another hakam-node is running; stopping it before launching ours"
+    sudo pkill -INT -x hakam-node 2>/dev/null || true
+    sleep 1
+    sudo pkill -KILL -x hakam-node 2>/dev/null || true
+fi
+
 # Pre-clean any stale state from a previous run.
 sudo ip link set dev "$IFACE" xdp off 2>/dev/null || true
 sudo tc qdisc del dev "$IFACE" clsact 2>/dev/null || true
+
+# Warn if there's no TCP listener at the target — probes that fire HTTP at it
+# will get RST before sending the payload, so no DPI match will ever happen.
+if ! nc -z -w 1 "$TARGET_IP" "$TARGET_PORT" 2>/dev/null; then
+    warn "nothing is listening on ${TARGET_IP}:${TARGET_PORT} — probes will fire but no DPI match will trigger"
+    warn "start a quick sink before running this script:"
+    warn "  while true; do nc -l -s $TARGET_IP -p $TARGET_PORT >/dev/null; done &"
+    warn "or use the demo's target listener if you have one"
+fi
 
 # ── 1. eBPF build (verifier go/no-go) ────────────────────────────────────────
 section "1. eBPF build (verifier go/no-go)"
@@ -190,9 +212,13 @@ if [ "$ws_ready" -eq 0 ]; then
 fi
 pass "WS server accepting on ${WS_HOST}:${WS_PORT}"
 
-# Foreground synchronous websocat — stdin inherited from the script's TTY,
-# pipe to awk closes on first METRICS, websocat gets SIGPIPE and exits.
-metrics_line=$(timeout 5 websocat --no-close --exit-on-eof "$WS_URL" 2>/dev/null \
+# Foreground websocat with two safety belts:
+#   * </dev/null — prevents websocat blocking on a TTY stdin read that
+#     SIGTERM can't unwind (the kernel keeps the read pending across signals).
+#   * timeout -k 2 5 — sends SIGTERM at 5 s, escalates to SIGKILL 2 s later
+#     if websocat hasn't exited (SIGKILL is uninterruptible).
+# Pipe to awk closes on the first METRICS, websocat gets SIGPIPE and exits.
+metrics_line=$(timeout -k 2 5 websocat --no-close "$WS_URL" </dev/null 2>/dev/null \
     | awk '/"type":"METRICS"/{print; exit}')
 
 if [ -n "$metrics_line" ]; then
@@ -216,7 +242,8 @@ wait_for_block() {
     local timeout_s="$1" src="$2" cat="$3" payload="$4"
     ( sleep 0.5; fire_payload "$src" "$payload" ) &
     local trigger_pid=$!
-    timeout "$timeout_s" websocat --no-close --exit-on-eof "$WS_URL" 2>/dev/null \
+    # </dev/null + timeout -k 2 — see the METRICS check above for why.
+    timeout -k 2 "$timeout_s" websocat --no-close "$WS_URL" </dev/null 2>/dev/null \
         | jq -r --unbuffered --arg s "$src" --arg c "$cat" \
             'select(.type == "BLOCK" and .source == $s and .category == $c) | .source' \
         | head -1
@@ -243,7 +270,7 @@ wait_for_connect() {
     local timeout_s="$1" dst="$2" trigger_func="$3"
     ( sleep 0.5; "$trigger_func" ) &
     local trigger_pid=$!
-    timeout "$timeout_s" websocat --no-close --exit-on-eof "$WS_URL" 2>/dev/null \
+    timeout -k 2 "$timeout_s" websocat --no-close "$WS_URL" </dev/null 2>/dev/null \
         | jq -r --unbuffered --arg d "$dst" \
             'select(.type == "CONNECT" and .dst == $d) | .dst' \
         | head -1
@@ -283,7 +310,7 @@ fire_split() {
 
 ( sleep 0.5; fire_split ) &
 split_trigger_pid=$!
-split_match=$(timeout 6 websocat --no-close --exit-on-eof "$WS_URL" 2>/dev/null \
+split_match=$(timeout -k 2 6 websocat --no-close "$WS_URL" </dev/null 2>/dev/null \
     | jq -r --unbuffered --arg s "$split_src" \
         'select(.type == "BLOCK" and .source == $s and .category == "SQLi") | .source' \
     | head -1)

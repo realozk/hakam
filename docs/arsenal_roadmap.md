@@ -1,7 +1,7 @@
 # Hakam — Black Hat Arsenal Roadmap
 
 > **Submission last chance:** **2026-08-31** · **Event:** ~Dec 2026 (Black Hat Europe)
-> **Today:** 2026-05-28 · **Budget:** 9 weeks to feature-complete (target **2026-07-28**), then ~4 weeks buffer to submit by **2026-08-24**.
+> **Today:** 2026-06-29 · **Budget:** 9 weeks to feature-complete (target **2026-07-28**), then ~4 weeks buffer to submit by **2026-08-24**.
 
 Submission day is the real deadline, not the event. Anything not shipped by **2026-08-24** is booth-only and does not influence acceptance.
 

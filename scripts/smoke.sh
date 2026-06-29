@@ -9,6 +9,8 @@
 #   4. A manual BLOCK command produces a BLOCK event on the WebSocket
 #   5. A manual UNBLOCK command produces an UNBLOCK event
 #   6. BLOCKLIST is clean after the test (no leftover entries)
+#   7. hakam-node still serves WS clients with the BPF-LSM hook armed
+#      (the socket_connect hook must never deny the daemon's own networking)
 #
 # Exit code: 0 = all checks pass, 1 = at least one check failed.
 #
@@ -141,6 +143,43 @@ if command -v bpftool &>/dev/null; then
 else
     info "bpftool not available — skipping kernel map check"
     info "Install: sudo apt install linux-tools-\$(uname -r)"
+fi
+
+# ── Check 7: hakam-node survives the BPF-LSM attach ──────────────────────────
+# The socket_connect LSM hook (Phase 2 #6) returns -EPERM for any connect() to
+# a destination in CONNECT_POLICY. The policy is default-allow and keyed only on
+# the destination, so it must never deny hakam-node's *own* networking. This
+# check pins that property: with the hook armed, a fresh WS client still has to
+# connect and receive data. If it can't, the hook is wrongly denying the daemon.
+
+info "Check 7: hakam-node still serves WS clients with the LSM hook armed…"
+if ! command -v websocat &>/dev/null; then
+    info "  websocat not available — skipping LSM survival check"
+else
+    LSM_ARMED="unknown"
+    if command -v bpftool &>/dev/null; then
+        if sudo bpftool prog show 2>/dev/null | grep -qE 'lsm|hakam_connect'; then
+            LSM_ARMED="yes"
+            info "  socket_connect LSM program is attached"
+        else
+            LSM_ARMED="no"
+        fi
+    fi
+
+    if [ "$LSM_ARMED" = "no" ]; then
+        info "  LSM program not attached (observe-only / unsupported kernel) — survival check N/A"
+    else
+        # Hardened dial (matches validate_phase1.sh): </dev/null stops websocat
+        # exiting on an immediate stdin EOF in non-interactive runs; timeout
+        # bounds it; grep -m1 closes the pipe on the first METRICS.
+        POST=$(timeout 4 websocat --no-close "$WS_URL" </dev/null 2>/dev/null | \
+            grep -m1 '"type":"METRICS"' || true)
+        if [ -n "$POST" ]; then
+            ok "Fresh WS client connected and received data post-LSM-attach"
+        else
+            fail "WS client got no data with LSM armed — hook may be denying hakam-node's own connects"
+        fi
+    fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
