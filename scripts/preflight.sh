@@ -163,6 +163,19 @@ else
     fix "in VM: sudo apt install linux-modules-extra-$(uname -r)"
 fi
 
+# BPF-LSM availability (Arsenal roadmap Phase 2 #6). The socket_connect hook
+# only enforces if 'bpf' is in the kernel's active LSM list (needs
+# CONFIG_BPF_LSM=y *and* 'bpf' in the lsm= cmdline). WARN, not FAIL: attach_lsm
+# degrades to observe-only when this is missing, so the demo still runs — but
+# the headline `connect()` → EPERM moment won't fire, and you want to know that
+# before the stage, not during it.
+if orb_ok "grep -qw bpf /sys/kernel/security/lsm"; then
+    ok "BPF-LSM active (socket_connect enforcement available)"
+else
+    warn "BPF-LSM not in active LSM list" "connect() enforcement runs observe-only → EPERM demo won't fire"
+    fix "in VM: add 'lsm=...,bpf' to kernel cmdline (needs CONFIG_BPF_LSM=y) and reboot"
+fi
+
 if orb_ok 'ip link show dummy0'; then
     # dummy interfaces report `state UNKNOWN` even when up — check the UP flag
     # in the angle-bracket flags (<…,UP,LOWER_UP>), not the state field.

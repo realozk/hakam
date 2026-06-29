@@ -25,9 +25,9 @@ use aya::{
     maps::{Array, LpmTrie, PerCpuArray, RingBuf},
     programs::{
         tc::{qdisc_add_clsact, TcAttachType},
-        SchedClassifier, TracePoint, Xdp, XdpFlags,
+        Lsm, SchedClassifier, TracePoint, Xdp, XdpFlags,
     },
-    Ebpf,
+    Btf, Ebpf,
 };
 #[cfg(feature = "linux")]
 use aya_log::EbpfLogger;
@@ -83,6 +83,7 @@ async fn main() -> Result<()> {
     attach_xdp(&mut bpf, &args, &bpf_path)?;
     attach_tc(&mut bpf, &args.iface)?;
     attach_tracepoint(&mut bpf)?;
+    attach_lsm(&mut bpf)?;
 
     println!();
 
@@ -93,6 +94,13 @@ async fn main() -> Result<()> {
     )
     .context("Failed to interpret 'BLOCKLIST' as LpmTrie<u32, u64>")?;
     let blocklist = Arc::new(Mutex::new(blocklist));
+
+    let connect_policy: LpmTrie<_, u32, u64> = LpmTrie::try_from(
+        bpf.take_map("CONNECT_POLICY")
+            .context("Map 'CONNECT_POLICY' not found — rebuild eBPF with cargo xtask build-ebpf")?,
+    )
+    .context("Failed to interpret 'CONNECT_POLICY' as LpmTrie<u32, u64>")?;
+    let connect_policy = Arc::new(Mutex::new(connect_policy));
 
     let drop_counter: PerCpuArray<_, u64> = PerCpuArray::try_from(
         bpf.take_map("DROP_COUNTER").context("Map 'DROP_COUNTER' not found")?,
@@ -211,6 +219,7 @@ async fn main() -> Result<()> {
     // ── CLI stdin loop ─────────────────────────────────────────────────────
     let ctx = CliCtx {
         blocklist: Arc::clone(&blocklist),
+        connect_policy: Arc::clone(&connect_policy),
         telemetry: Arc::clone(&telemetry_tx),
         stats: Arc::clone(&dpi_stats),
         drop_counter: Arc::clone(&drop_counter),
@@ -330,6 +339,56 @@ fn attach_tracepoint(bpf: &mut Ebpf) -> Result<()> {
                 "unavailable — process monitoring disabled".bright_black(),
             );
         }
+    }
+    Ok(())
+}
+
+// BPF-LSM socket_connect enforcement (Arsenal roadmap Phase 2 #6). Degrades to
+// observe-only (tracepoint stays active) if the kernel lacks BPF-LSM, so the
+// demo never hard-fails on a reviewer's box — it just loses enforcement.
+fn attach_lsm(bpf: &mut Ebpf) -> Result<()> {
+    let lsm_unavailable = |reason: &str| {
+        warn!("BPF-LSM connect() enforcement disabled: {reason}");
+        println!(
+            "  {}  {} {}",
+            "◈".yellow(),
+            "LSM".yellow(),
+            "unavailable — connect() enforcement off (observe-only)".bright_black(),
+        );
+    };
+
+    let btf = match Btf::from_sys_fs() {
+        Ok(b) => b,
+        Err(e) => {
+            lsm_unavailable(&format!("kernel BTF unreadable ({e})"));
+            return Ok(());
+        }
+    };
+
+    let prog: &mut Lsm = bpf
+        .program_mut("hakam_connect_lsm")
+        .context("BPF program 'hakam_connect_lsm' not found — rebuild with cargo xtask build-ebpf")?
+        .try_into()
+        .context("'hakam_connect_lsm' is not of type Lsm")?;
+
+    if let Err(e) = prog.load("socket_connect", &btf) {
+        lsm_unavailable(&format!(
+            "load failed ({e}) — need CONFIG_BPF_LSM=y and 'bpf' in /sys/kernel/security/lsm"
+        ));
+        return Ok(());
+    }
+
+    match prog.attach() {
+        Ok(_) => {
+            println!(
+                "  {}  {} {} {}",
+                "◉".bright_red().bold(),
+                "LSM".bright_red().bold(),
+                "armed".bright_black(),
+                "— socket_connect() syscall-layer egress denial (pre-packet)".bright_black(),
+            );
+        }
+        Err(e) => lsm_unavailable(&format!("attach failed ({e})")),
     }
     Ok(())
 }

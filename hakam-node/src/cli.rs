@@ -242,6 +242,9 @@ fn print_help() {
     println!("  {}", "──────────────────────────────────────────────────────────────".bright_black());
     row("block <IP[/prefix]>", "drop all packets from/to IP or CIDR range");
     row("unblock <IP[/prefix]>", "restore traffic from/to IP or CIDR range");
+    row("policy-block <IP[/prefix]>", "deny local connect() to dest at the LSM (EPERM)");
+    row("policy-unblock <IP[/prefix]>", "permit connect() to dest again");
+    row("policy-list", "print active connect() egress-policy rules");
     row("list", "print active block rules with age + TTL");
     row("status", "interface, hooks, signature corpus, blocklist");
     row("rules", "show DPI signature families and counts");
@@ -254,6 +257,7 @@ fn print_help() {
 
 pub struct CliCtx {
     pub blocklist: Arc<Mutex<LpmTrie<MapData, u32, u64>>>,
+    pub connect_policy: Arc<Mutex<LpmTrie<MapData, u32, u64>>>,
     pub telemetry: Arc<Sender>,
     pub stats: Arc<Mutex<DpiStats>>,
     pub drop_counter: Arc<Mutex<PerCpuArray<MapData, u64>>>,
@@ -291,6 +295,9 @@ pub fn run_stdin_loop(ctx: CliCtx) -> Result<()> {
         match cmd.as_str() {
             "block" => cmd_block(&ctx, arg),
             "unblock" => cmd_unblock(&ctx, arg),
+            "policy-block" => cmd_policy_block(&ctx, arg),
+            "policy-unblock" => cmd_policy_unblock(&ctx, arg),
+            "policy-list" => cmd_policy_list(&ctx),
             "list" => cmd_list(&ctx),
             "status" => cmd_status(&ctx),
             "rules" | "sigs" | "signatures" => cmd_rules(),
@@ -373,6 +380,99 @@ fn cmd_unblock(ctx: &CliCtx, arg: Option<&str>) {
             }
         }
     }
+}
+
+// ── connect() egress policy (Arsenal roadmap Phase 2 #6) ────────────────────
+// These manage CONNECT_POLICY, which the BPF-LSM socket_connect hook consults.
+// A listed destination causes a local process's connect() to fail with EPERM —
+// the syscall is denied, distinct from the XDP/TC path which drops packets.
+
+fn cmd_policy_block(ctx: &CliCtx, arg: Option<&str>) {
+    let Some(target) = arg else {
+        print_error("Usage: policy-block <IP> or policy-block <IP/prefix>");
+        return;
+    };
+    match parse_cidr(target) {
+        Err(e) => print_error(&e),
+        Ok((ip, prefix)) => {
+            let now_ns = boot_time_ns();
+            let key = lpm_key(ip, prefix);
+            let display = format_lpm_key(&key);
+            let mut map = ctx.connect_policy.blocking_lock();
+            match map.insert(&key, &now_ns, 0) {
+                Ok(_) => {
+                    println!(
+                        "\n  {}  {}  {}\n",
+                        "▼ LSM POLICY".bright_red().bold().on_black(),
+                        display.bright_white().bold(),
+                        "→ connect() denied at syscall".bright_red(),
+                    );
+                    let _ = ctx.telemetry.send(event_json(
+                        &format!("LSM policy: connect() to {} now denied (EPERM)", display),
+                        "critical",
+                    ));
+                }
+                Err(e) => print_error(&format!("Policy map insert failed: {}", e)),
+            }
+        }
+    }
+}
+
+fn cmd_policy_unblock(ctx: &CliCtx, arg: Option<&str>) {
+    let Some(target) = arg else {
+        print_error("Usage: policy-unblock <IP> or policy-unblock <IP/prefix>");
+        return;
+    };
+    match parse_cidr(target) {
+        Err(e) => print_error(&e),
+        Ok((ip, prefix)) => {
+            let key = lpm_key(ip, prefix);
+            let display = format_lpm_key(&key);
+            let mut map = ctx.connect_policy.blocking_lock();
+            match map.remove(&key) {
+                Ok(_) => {
+                    println!(
+                        "\n  {}  {}  {}\n",
+                        "▲ LSM POLICY".green().bold(),
+                        display.bright_white().bold(),
+                        "→ connect() permitted again".green(),
+                    );
+                    let _ = ctx.telemetry.send(event_json(
+                        &format!("LSM policy: connect() to {} permitted again", display),
+                        "info",
+                    ));
+                }
+                Err(e) => print_error(&format!("Policy map remove failed: {}", e)),
+            }
+        }
+    }
+}
+
+fn cmd_policy_list(ctx: &CliCtx) {
+    let map = ctx.connect_policy.blocking_lock();
+    let entries: Vec<(Key<u32>, u64)> = map.iter().filter_map(|r| r.ok()).collect();
+    drop(map);
+
+    println!();
+    if entries.is_empty() {
+        println!(
+            "  {}  {}",
+            "▸".bright_black(),
+            "connect() policy is empty — no destinations denied".bright_black()
+        );
+    } else {
+        println!(
+            "  {}  {}",
+            "▸".bright_red().bold(),
+            format!("{} destination(s) denied at connect()", entries.len())
+                .bright_white()
+                .bold(),
+        );
+        for (key, _) in &entries {
+            println!("    {}  {}", "•".bright_red(), format_lpm_key(key).bright_white());
+        }
+    }
+    println!();
 }
 
 fn cmd_list(ctx: &CliCtx) {

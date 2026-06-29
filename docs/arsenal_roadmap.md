@@ -141,7 +141,7 @@ Update this as you ship each item. Phase numbers map to the tables above.
 | 1 | 3 — Aho-Corasick | ✅ | case-insensitive, zero per-packet allocation |
 | 1 | 4 — DPI tests + evasion enforcement | ✅ | tests/dpi_matcher.rs pins every evasion row |
 | 1 | 5 — Uppercase assertion | ✅ | + length/empty/category-sync invariants |
-| 2 | 6 — BPF-LSM socket_connect | ⬜ | |
+| 2 | 6 — BPF-LSM socket_connect | ✅ | LSM `socket_connect` returns -EPERM on a `CONNECT_POLICY` dst hit — `connect()` denied pre-packet. `policy-block/unblock/list` CLI manages the map. Degrades to observe-only when `bpf` absent from active LSM list; preflight WARNs on this. Validated on hakam VM: blocked dst → curl/python/nc all get EPERM (0 ms), non-blocked dst still connects (selective). Limitation: dst-keyed, not task-keyed — per-process *policy* scoping deferred to #7 (attribution already lands via #8). |
 | 2 | 7 — Tight eBPF conntrack | ⬜ | |
 | 2 | 8 — Per-process attribution in BLOCK | ✅ | connect_task records (dst_addr,dst_port)→(pid,comm); payload_task correlates on a BLOCK and names origin in INTERCEPT line + BLOCK JSON; HUD log shows "origin PID/comm". Verified end-to-end on VM real traffic. Limitation: dst-keyed, most-recent-wins within 120s TTL — #7 conntrack tightens to source-port precision. |
 | 3 | 9 — systemd + container | ⬜ | |

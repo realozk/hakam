@@ -2,12 +2,13 @@
 #![no_main]
 
 use aya_ebpf::{
-    macros::{classifier, map, tracepoint, xdp},
+    macros::{classifier, lsm, map, tracepoint, xdp},
     maps::{Array, LpmTrie, LruPerCpuHashMap, PerCpuArray, RingBuf},
-    programs::{TcContext, TracePointContext, XdpContext},
+    programs::{LsmContext, TcContext, TracePointContext, XdpContext},
 };
 
 mod helpers;
+mod lsm;
 mod tc;
 mod tracepoint;
 mod xdp;
@@ -38,6 +39,13 @@ pub const TP_OFF_USERVADDR: usize = 24;
 // Value: nanosecond boot timestamp of the block insertion; userspace uses it for TTL.
 #[map]
 pub static BLOCKLIST: LpmTrie<u32, u64> = LpmTrie::<u32, u64>::with_max_entries(1024, 0);
+
+// Outbound connect() policy (Arsenal roadmap Phase 2 #6). Same key convention as
+// BLOCKLIST: a destination IP a local process is forbidden to connect() to. The
+// LSM socket_connect hook consults this and returns -EPERM on a hit, killing the
+// syscall before any packet is created. Userspace-managed via `policy-block`.
+#[map]
+pub static CONNECT_POLICY: LpmTrie<u32, u64> = LpmTrie::<u32, u64>::with_max_entries(1024, 0);
 
 // LruPerCpuHashMap: each CPU has its own counter slot for each key (race-free
 // without atomics); kernel auto-evicts the oldest entry on capacity hit so a
@@ -92,6 +100,11 @@ pub fn hakam_egress(ctx: TcContext) -> i32 {
 #[tracepoint]
 pub fn hakam_connect(ctx: TracePointContext) -> i32 {
     tracepoint::run(ctx)
+}
+
+#[lsm(hook = "socket_connect")]
+pub fn hakam_connect_lsm(ctx: LsmContext) -> i32 {
+    lsm::run(ctx)
 }
 
 #[cfg(not(test))]

@@ -86,7 +86,9 @@ The string match itself is **userspace**. Nothing else makes sense under the eBP
 5. Every subsequent packet from that IP hits the BLOCKLIST branch in XDP and is dropped *before* IP routing.
 6. After 120 s, `ttl_sweep_task` removes the entry and broadcasts `UNBLOCK`.
 
-**Detection is reactive, not preventive** — the first attacking *flow* always passes through to the host (one segment for a single-shot attack; up to a few segments while the reassembler waits for enough bytes). The follow-up flood is what gets stopped at the driver edge. This is intentional (keeps the kernel program verifier-safe) but it's the honest answer when someone asks "did the first SQLi reach the app." Phase 2 #6 (`BPF-LSM socket_connect`) will close this for the `connect()` syscall path specifically.
+**On the packet path, detection is reactive, not preventive** — the first attacking *flow* always passes through to the host (one segment for a single-shot attack; up to a few segments while the reassembler waits for enough bytes). The follow-up flood is what gets stopped at the driver edge. This is intentional (keeps the kernel program verifier-safe) but it's the honest answer when someone asks "did the first SQLi reach the app."
+
+**On the `connect()` syscall path, the BPF-LSM `socket_connect` hook (Phase 2 #6) is preventive** — a destination in `CONNECT_POLICY` makes the originating `connect(2)` return `-EPERM`, so the connection never forms and no packet is ever created. Honest scope: this covers `connect()`-based IPv4 flows only. Connectionless UDP (`sendto` without `connect`) and the packet path above stay reactive — TC egress is the catch-all there. The policy is destination-keyed (deny anyone from reaching a listed dst), not task-keyed; per-process *attribution* on a block is a separate mechanism (#8).
 
 ---
 
