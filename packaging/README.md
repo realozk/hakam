@@ -22,7 +22,7 @@ sudo systemctl stop hakam                      # clean detach (SIGINT)
 Config lives in `/etc/hakam/hakam.env` (interface, XDP mode, bind address). The
 service runs headless and detaches every hook on stop.
 
-## Option B — container  ⚠️ written, not build-tested in this repo's CI yet
+## Option B — container  ✅ validated
 
 ```bash
 docker build -f packaging/docker/Dockerfile -t hakam:latest .   # from repo root
@@ -30,10 +30,15 @@ HAKAM_IFACE=eth0 ./packaging/docker/run.sh
 ```
 
 The container build compiles the eBPF object from source, so it pulls a Rust
-toolchain and `bpf-linker` (the slow, environment-sensitive step — ~10 min). The
-run is `--privileged --network host` because eBPF attaches to the **host** kernel
-and interfaces; the telemetry WebSocket is then on `ws://<host>:8080/ws`.
+toolchain and `bpf-linker` (the slow step — ~10–15 min). The run is
+`--privileged --network host` because eBPF attaches to the **host** kernel and
+interfaces; the telemetry WebSocket is then on `ws://<host>:8080/ws`.
 `docker stop` sends SIGINT, so hooks detach cleanly.
+
+Validated end-to-end (Docker 29, kernel 6.x): `docker run` arms XDP + TC +
+BPF-LSM headless and serves telemetry; a SQLi fired at a target was dropped by
+the container's datapath (`BLOCK … XDP_DROP`); `docker stop` exited 0 with all
+hooks detached.
 
 ## Optional — the UI (not required)
 
