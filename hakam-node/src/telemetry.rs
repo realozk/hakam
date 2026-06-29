@@ -23,6 +23,7 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn metrics_json(
     cpu: f32,
     p50_ns: u64,
@@ -32,10 +33,11 @@ pub fn metrics_json(
     tx_bps: u64,
     mem_kb: u64,
     ring_overflows: u64,
+    active_flows: u64,
 ) -> String {
     format!(
-        r#"{{"type":"METRICS","cpu":{:.1},"latency_p50_ns":{},"latency_p99_ns":{},"dropped":{},"rx_bps":{},"tx_bps":{},"mem_kb":{},"ring_overflows":{}}}"#,
-        cpu, p50_ns, p99_ns, dropped, rx_bps, tx_bps, mem_kb, ring_overflows
+        r#"{{"type":"METRICS","cpu":{:.1},"latency_p50_ns":{},"latency_p99_ns":{},"dropped":{},"rx_bps":{},"tx_bps":{},"mem_kb":{},"ring_overflows":{},"active_flows":{}}}"#,
+        cpu, p50_ns, p99_ns, dropped, rx_bps, tx_bps, mem_kb, ring_overflows, active_flows
     )
 }
 

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Result;
 use aya::{
-    maps::{lpm_trie::Key, LpmTrie, MapData, PerCpuArray},
+    maps::{lpm_trie::Key, HashMap as AyaHashMap, LpmTrie, MapData, PerCpuArray},
     programs::XdpFlags,
 };
 use clap::Parser;
@@ -263,6 +263,7 @@ pub struct CliCtx {
     pub drop_counter: Arc<Mutex<PerCpuArray<MapData, u64>>>,
     pub latency_hist: Arc<Mutex<PerCpuArray<MapData, u64>>>,
     pub ring_overflow: Arc<Mutex<PerCpuArray<MapData, u64>>>,
+    pub conntrack: Arc<Mutex<AyaHashMap<MapData, [u8; 12], [u8; 24]>>>,
     pub iface: String,
     pub bpf_path: Arc<PathBuf>,
 }
@@ -596,11 +597,17 @@ fn cmd_stats(ctx: &CliCtx) {
         let m = ctx.ring_overflow.blocking_lock();
         m.get(&0u32, 0).map(|v| v.iter().sum()).unwrap_or(0)
     };
+    // Live kernel conntrack table size — the Phase 2 #7 exit-criterion number.
+    let active_flows: u64 = {
+        let m = ctx.conntrack.blocking_lock();
+        m.keys().filter(|k| k.is_ok()).count() as u64
+    };
     let stats = ctx.stats.blocking_lock();
 
     println!();
     println!("  {}  {}", "▸".bright_yellow().bold(), "live counters".bright_yellow().bold());
     println!("  {}", "──────────────────────────────────────────────────────────────".bright_black());
+    println!("    {:<22} {}", "active flows".bright_black(), active_flows.to_string().bright_cyan().bold());
     println!("    {:<22} {}", "kernel drops".bright_black(), dropped.to_string().bright_red().bold());
     println!("    {:<22} {}", "drop latency p50".bright_black(), format!("{} ns", p50).cyan());
     println!("    {:<22} {}", "drop latency p99".bright_black(), format!("{} ns", p99).cyan());
@@ -608,6 +615,9 @@ fn cmd_stats(ctx: &CliCtx) {
     println!("    {:<22} {}", "HTTP seen".bright_black(), stats.total_http_seen.to_string().cyan());
     println!("    {:<22} {}", "benign passed".bright_black(), benign_passed.to_string().bright_green().bold());
     println!("    {:<22} {}", "DPI detections".bright_black(), stats.total_detections.to_string().bright_yellow().bold());
+    println!("    {:<22} {}", "reassembly flows".bright_black(), stats.reassembly_flows.to_string().cyan());
+    println!("    {:<22} {}", "retransmits dropped".bright_black(), stats.retransmit_dropped.to_string().cyan());
+    println!("    {:<22} {}", "out-of-order segs".bright_black(), stats.out_of_order.to_string().cyan());
     let overflow_color = if ring_overflows == 0 {
         ring_overflows.to_string().bright_green().bold()
     } else {

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 #[cfg(feature = "linux")]
 use aya::{
-    maps::{Array, LpmTrie, PerCpuArray, RingBuf},
+    maps::{Array, HashMap as AyaHashMap, LpmTrie, PerCpuArray, RingBuf},
     programs::{
         tc::{qdisc_add_clsact, TcAttachType},
         Lsm, SchedClassifier, TracePoint, Xdp, XdpFlags,
@@ -102,6 +102,16 @@ async fn main() -> Result<()> {
     .context("Failed to interpret 'CONNECT_POLICY' as LpmTrie<u32, u64>")?;
     let connect_policy = Arc::new(Mutex::new(connect_policy));
 
+    // CONNTRACK (Phase 2 #7). Typed as raw byte arrays (FlowKey is 12 B,
+    // FlowState 24 B) so we don't need to impl aya::Pod on the shared types —
+    // we only ever count its entries for the `active_flows` stat.
+    let conntrack: AyaHashMap<_, [u8; 12], [u8; 24]> = AyaHashMap::try_from(
+        bpf.take_map("CONNTRACK")
+            .context("Map 'CONNTRACK' not found — rebuild eBPF with cargo xtask build-ebpf")?,
+    )
+    .context("Failed to interpret 'CONNTRACK' as HashMap")?;
+    let conntrack = Arc::new(Mutex::new(conntrack));
+
     let drop_counter: PerCpuArray<_, u64> = PerCpuArray::try_from(
         bpf.take_map("DROP_COUNTER").context("Map 'DROP_COUNTER' not found")?,
     )
@@ -170,6 +180,7 @@ async fn main() -> Result<()> {
         Arc::clone(&drop_counter),
         Arc::clone(&latency_hist),
         Arc::clone(&ring_overflow),
+        Arc::clone(&conntrack),
         args.iface.clone(),
     ));
 
@@ -225,6 +236,7 @@ async fn main() -> Result<()> {
         drop_counter: Arc::clone(&drop_counter),
         latency_hist: Arc::clone(&latency_hist),
         ring_overflow: Arc::clone(&ring_overflow),
+        conntrack: Arc::clone(&conntrack),
         iface: args.iface.clone(),
         bpf_path: Arc::new(bpf_path),
     };

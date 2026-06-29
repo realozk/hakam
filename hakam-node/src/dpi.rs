@@ -63,6 +63,10 @@ pub struct DpiStats {
     pub total_http_seen: u64,
     pub total_detections: u64,
     pub by_category: HashMap<&'static str, u64>,
+    // Reassembler gauges (Phase 2 #7), refreshed each GC tick from payload_task.
+    pub reassembly_flows: u64,
+    pub retransmit_dropped: u64,
+    pub out_of_order: u64,
 }
 
 fn severity_paint(sev: &str) -> colored::ColoredString {
@@ -104,6 +108,11 @@ pub async fn payload_task(
             let now_ns = boot_time_ns();
             if events_seen % REASSEMBLY_GC_INTERVAL == 0 {
                 reassembler.gc(now_ns);
+                // Publish reassembler gauges for the `stats` command.
+                let mut s = stats.lock().await;
+                s.reassembly_flows = reassembler.flow_count() as u64;
+                s.retransmit_dropped = reassembler.dropped_retransmit();
+                s.out_of_order = reassembler.out_of_order_seen();
             }
 
             let key = FlowKey::from_event(event);

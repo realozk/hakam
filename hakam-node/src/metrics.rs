@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use aya::maps::{MapData, PerCpuArray};
+use aya::maps::{HashMap as AyaHashMap, MapData, PerCpuArray};
 use tokio::sync::Mutex;
 
 use crate::telemetry::{metrics_json, Sender};
@@ -54,6 +54,7 @@ pub async fn ticker(
     drop_counter: Arc<Mutex<PerCpuArray<MapData, u64>>>,
     latency_hist: Arc<Mutex<PerCpuArray<MapData, u64>>>,
     ring_overflow: Arc<Mutex<PerCpuArray<MapData, u64>>>,
+    conntrack: Arc<Mutex<AyaHashMap<MapData, [u8; 12], [u8; 24]>>>,
     iface: String,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -79,6 +80,14 @@ pub async fn ticker(
             map.get(&0u32, 0).map(|v| v.iter().sum()).unwrap_or(0)
         };
 
+        // Live count of the kernel conntrack table — the Phase 2 #7 exit number.
+        // Iterating the keys is approximate under concurrent kernel writes, which
+        // is fine for a gauge.
+        let active_flows: u64 = {
+            let map = conntrack.lock().await;
+            map.keys().filter(|k| k.is_ok()).count() as u64
+        };
+
         let (rx_bps, tx_bps) = match read_iface_bytes(&iface).await {
             Some(curr) => {
                 let rx = curr.0.saturating_sub(prev_iface.0);
@@ -92,7 +101,7 @@ pub async fn ticker(
         let mem_kb = read_self_rss_kb().await.unwrap_or(0);
 
         let _ = tx.send(metrics_json(
-            cpu, p50_ns, p99_ns, dropped, rx_bps, tx_bps, mem_kb, ring_overflows,
+            cpu, p50_ns, p99_ns, dropped, rx_bps, tx_bps, mem_kb, ring_overflows, active_flows,
         ));
     }
 }
