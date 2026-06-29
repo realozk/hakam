@@ -80,7 +80,7 @@ The string match itself is **userspace**. Nothing else makes sense under the eBP
 ## 4 · Data flow on attack
 
 1. Packet arrives → XDP. Not in BLOCKLIST, not rate-limited → `XDP_PASS`. First 64 B of TCP payload + full 4-tuple (`src_addr`, `dst_addr`, `src_port`, `dst_port`) pushed to `PAYLOAD_EVENTS`.
-2. `payload_task` pulls from the ring, constructs a `FlowKey`, and calls `Reassembler::ingest` — the per-flow buffer (default 256 B cap, 30 s TTL) accumulates segments from the same 4-tuple.
+2. `payload_task` pulls from the ring, constructs a `FlowKey`, and calls `Reassembler::ingest`. The per-flow buffer (default 256 B cap, 30 s TTL) accumulates segments from the same 4-tuple **in TCP sequence order** (Phase 2 #7) — out-of-order delivery is reordered and retransmits are deduped, using the `seq` the kernel stamps on each event. Separately, XDP records every TCP segment into the kernel `CONNTRACK` flow table (`seq_next`/`last_ts`/`packets`/`dir`), whose live size is surfaced as `active_flows`.
 3. Match runs on the **reassembled view**, not just this segment. First, the HTTP method gate (`GET ` / `POST ` / `PUT ` / `HEAD ` / `DELETE ` / `OPTIONS ` / `PATCH ` / `CONNECT ` / `TRACE `). Then the Aho-Corasick automaton over all 203 signatures (case-insensitive on raw bytes). If that misses, a single-pass URL-decoded view (`%XX` → byte, `+` → space) is scanned as a fallback — so `UNION%20SELECT` and `UNION+SELECT` both hit.
 4. On hit: userspace inserts `(src_addr, /32, boot_time_ns)` into the kernel `BLOCKLIST` LpmTrie via aya, calls `Reassembler::forget(flow)` so the same connection can be re-inspected (HTTP keep-alive), broadcasts `BLOCK` JSON to every WS subscriber, and increments `DpiStats`.
 5. Every subsequent packet from that IP hits the BLOCKLIST branch in XDP and is dropped *before* IP routing.
@@ -117,6 +117,8 @@ The HUD (`hakam-ui`) subscribes and renders. It does not push anything back — 
 | `LAST_SEEN` | `LruPerCpuHashMap<u32,u32>` | 1024 | Per-IP last window-second; rolls counter on change. |
 | `PAYLOAD_EVENTS` | `RingBuf` | 1 MiB | TCP payload samples + 4-tuple → DPI. |
 | `CONNECT_EVENTS` | `RingBuf` | 512 KiB | Outbound `connect()` events. |
+| `CONNTRACK` | `LruHashMap<FlowKey,FlowState>` | 65536 | Phase 2 #7 flow table — `seq_next`/`last_ts`/`packets`/`dir` per 4-tuple. LRU eviction; count surfaced as `active_flows`. |
+| `CONNECT_POLICY` | `LpmTrie<u32,u64>` | 1024 | Phase 2 #6 — destinations denied at the `socket_connect` LSM hook. |
 | `DROP_COUNTER` | `PerCpuArray<u64>` | 1 | Total drops, summed in userspace. |
 | `LATENCY_HIST` | `PerCpuArray<u64>` | 64 | log2-bucketed XDP_DROP latency. |
 | `RING_OVERFLOW` | `PerCpuArray<u64>` | 1 | Counter of samples we couldn't enqueue (ring full) — surfaced in CLI `stats`. |
@@ -132,7 +134,7 @@ The full evasion table (30 mutations, hit/miss verified by `cargo test --test dp
 
 - **No regex.** Aho-Corasick substring matching with ASCII case-folding plus a single-pass URL-decode fallback. **Recursive decoding (e.g. `%2520`) is not unwound**, by design — it amplifies false-positive surface on legitimate URLs.
 - **First packet always passes.** Detection is reactive (see §4). Slow-and-low scanners that send one payload per source IP from a wide pool are a worst case.
-- **64-byte sample window per segment.** Reassembly stitches segments from the same 4-tuple into a 256-byte buffer, so the split-segment evasion is closed for in-order delivery — but a single oversized segment still truncates at 64 B, and out-of-order TCP can break a split signature until the Phase 2 #7 conntrack lands.
+- **64-byte sample window per segment.** Reassembly stitches segments from the same 4-tuple into a 256-byte buffer **in TCP sequence order** (Phase 2 #7), so the split-segment evasion is closed for both in-order *and* out-of-order delivery, and retransmits are deduped. The residual gap is the sample window itself: a single oversized segment still truncates at 64 B, and a payload split across a segment Hakam never sampled (sub-64-byte segments aren't sampled) leaves a hole.
 - **Per-CPU rate limit.** The `RATE_LIMIT = 500 pps` is per-CPU per-IP because of the way HashMap lookups work in eBPF, so the worst-case effective limit is `500 × num_cpus`. Fine at demo scale, not a hard guarantee on bigger boxes.
 - **IPv4 only.** No IPv6 path in any of the three programs.
 - **`dummy0` SKB-mode** in the demo. Native-mode XDP on a real NIC has not been benchmarked yet — that's Arsenal Phase 3 (driver-mode + perf rewrite).
@@ -148,10 +150,10 @@ The full evasion table (30 mutations, hit/miss verified by `cargo test --test dp
 |--------|------:|------|
 | `hakam-common` lib | 10 | `Ipv4Addr` byte order, std interop, `PayloadEvent` layout (16 + `PAYLOAD_LEN` bytes), `ConnectEvent` layout. |
 | `hakam-node` lib · `signatures` | 4 | Uppercase / non-empty / ≤ `PAYLOAD_LEN` / `CATEGORIES`-in-sync invariants. |
-| `hakam-node` lib · `reassembly` | 7 | Concatenation, flow isolation, `forget`, GC eviction, buffer cap, flow cap. |
+| `hakam-node` lib · `reassembly` | 10 | Concatenation, flow isolation, `forget`, GC eviction, buffer cap, flow cap, retransmit dedupe, out-of-order reassembly. |
 | `hakam-node` lib · `monitor` | 5 | CIDR packing for `MONITOR_CFG` across /0, /16, /24, /32 and the monitor-all sentinel. |
 | `hakam-node` `tests/dpi_matcher.rs` | 25 | One test per row of [`evasion.md`](evasion.md) + smoke + HTTP-gate coverage. |
-| `hakam-node` `tests/reassembly.rs` | 4 | End-to-end split-segment attacks; benign + attacker flow isolation; keep-alive `forget`. |
+| `hakam-node` `tests/reassembly.rs` | 5 | End-to-end split-segment attacks (in-order + reordered); benign + attacker flow isolation; keep-alive `forget`. |
 | `hakam-node` `tests/unit_tests.rs` | 11 | Byte order, mock blocklist, command tokenisation, IP parsing, capacity. |
 
 What's still missing:
