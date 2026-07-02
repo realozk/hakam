@@ -2,6 +2,7 @@
 name    = "hakam-node"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 aya          = { version = "0.13", features = ["async_tokio"], optional = true }

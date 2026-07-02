@@ -2,6 +2,7 @@
 name    = "hakam-common"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # This crate is shared between user-space (std) and kernel-space (no_std).
 # Keeping it no_std ensures it can be imported by hakam-ebpf without

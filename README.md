@@ -1,5 +1,7 @@
 # Hakam
 
+> **Kernel-space HTTP threat interception on eBPF/XDP.** Attacks are dropped at the driver edge — before a socket buffer is ever allocated.
+
 Hakam is a kernel-level HTTP threat interceptor I built on top of eBPF. The idea is simple: drop attacks before they ever reach the network stack. No socket buffer gets allocated, no userspace overhead — the kernel just kills the packet at the XDP hook and moves on.
 
 A userspace engine running alongside it does the heavy lifting for deep packet inspection — matching 202 signatures across 13 attack families — and when something hits, it pushes the attacker's IP directly into a kernel map to block all future traffic. There's also a browser HUD that shows everything in real time.
@@ -78,10 +80,11 @@ git clone https://github.com/realozk/hakam.git && cd hakam
 # Build eBPF + launch hakam-node (requires nightly + bpf-linker)
 # XDP attaches to `lo` because local-to-local traffic between dummy0 IP aliases
 # routes via loopback in the Linux kernel — that's where the packets actually flow.
-cargo xtask run --iface lo --mode skb
+cargo xtask run --iface lo --mode skb --bind 0.0.0.0   # 0.0.0.0 so a HUD on another host can reach the WS
 
 # ── Mac (separate terminal) ────────────────────────────────────────────────
-cd hakam-ui && npm install && npm run dev
+cd hakam-ui && npm install
+VITE_HAKAM_WS_URL=ws://<vm-ip>:8080/ws npm run dev     # point the HUD at the VM — see start_guide.md
 # Open http://localhost:5173 in a browser
 
 # ── Fire attacks (VM, third terminal) ──────────────────────────────────────
@@ -142,3 +145,9 @@ node --version   # ≥ 18
 - [`docs/architecture.md`](docs/architecture.md) — kernel/userspace boundary diagram, map table, hook table
 - [`docs/codebase.md`](docs/codebase.md) — per-file walkthrough, eBPF verifier notes
 - [`docs/runtime_flow.md`](docs/runtime_flow.md) — packet lifecycle from NIC to block event
+
+---
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
