@@ -9,11 +9,15 @@
 # The telemetry WebSocket is then on ws://<host>:8080/ws (host networking).
 set -euo pipefail
 
+# --name hakam so the second terminal can `docker exec hakam …` to fire attacks.
+# HAKAM_DEMO=1 builds the self-contained loopback test net (see REVIEW.md).
 exec docker run --rm -it \
+    --name hakam \
     --privileged \
     --network host \
     -v /sys/kernel/btf:/sys/kernel/btf:ro \
     -e HAKAM_IFACE="${HAKAM_IFACE:-eth0}" \
     -e HAKAM_MODE="${HAKAM_MODE:-skb}" \
     -e HAKAM_BIND="${HAKAM_BIND:-0.0.0.0}" \
+    -e HAKAM_DEMO="${HAKAM_DEMO:-0}" \
     hakam:latest

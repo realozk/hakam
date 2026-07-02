@@ -36,15 +36,24 @@ RUN cargo xtask build-ebpf \
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
-# iproute2 gives the entrypoint `ip`/`tc` to clear stale hooks.
+# iproute2 gives the entrypoint `ip`/`tc`/`ss` to clear stale hooks and build the
+# loopback demo net. netcat/curl/python3/awk let the bundled attack + benign
+# scripts run *inside* the container, so a reviewer needs nothing but Docker.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        iproute2 ca-certificates \
+        iproute2 ca-certificates netcat-openbsd curl python3 gawk \
     && rm -rf /var/lib/apt/lists/*
+
+# The demo scripts call `sudo`; inside a root container there is no sudo package
+# and none is needed. This shim makes them run unmodified.
+RUN printf '#!/bin/sh\nexec "$@"\n' > /usr/local/bin/sudo && chmod +x /usr/local/bin/sudo
 
 COPY --from=builder /src/target/release/hakam-node /usr/local/bin/hakam-node
 COPY --from=builder /src/target/bpfel-unknown-none/release/hakam-ebpf /usr/local/lib/hakam/hakam-ebpf
 COPY packaging/docker/entrypoint.sh /usr/local/bin/hakam-entrypoint
-RUN chmod +x /usr/local/bin/hakam-entrypoint
+# Self-contained review harness — attack firehose, benign generator, and the
+# loopback target bootstrap. Driven by HAKAM_DEMO=1; see packaging/docker/REVIEW.md.
+COPY scripts/setup-demo.sh scripts/seclist-attack.sh scripts/benign-traffic.sh scripts/target-listener.py /opt/hakam/scripts/
+RUN chmod +x /usr/local/bin/hakam-entrypoint /opt/hakam/scripts/*.sh /opt/hakam/scripts/*.py
 
 ENV HAKAM_IFACE=eth0 \
     HAKAM_MODE=skb \

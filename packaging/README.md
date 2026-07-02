@@ -24,9 +24,14 @@ service runs headless and detaches every hook on stop.
 
 ## Option B — container  ✅ validated
 
+> **Reviewing, not deploying?** See [`docker/REVIEW.md`](docker/REVIEW.md) — a
+> prebuilt-image path (no source build) with a one-flag self-contained demo:
+> `sudo HAKAM_DEMO=1 ./run.sh`, then fire attacks from a second terminal. Build
+> the shippable tarball with [`docker/save-image.sh`](docker/save-image.sh).
+
 ```bash
 docker build -f packaging/docker/Dockerfile -t hakam:latest .   # from repo root
-HAKAM_IFACE=eth0 ./packaging/docker/run.sh
+HAKAM_IFACE=eth0 ./packaging/docker/run.sh                       # production: real NIC
 ```
 
 The container build compiles the eBPF object from source, so it pulls a Rust
