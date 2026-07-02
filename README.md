@@ -2,7 +2,7 @@
 
 Hakam is a kernel-level HTTP threat interceptor I built on top of eBPF. The idea is simple: drop attacks before they ever reach the network stack. No socket buffer gets allocated, no userspace overhead — the kernel just kills the packet at the XDP hook and moves on.
 
-A userspace engine running alongside it does the heavy lifting for deep packet inspection — matching 203 signatures across 12 attack families — and when something hits, it pushes the attacker's IP directly into a kernel map to block all future traffic. There's also a browser HUD that shows everything in real time.
+A userspace engine running alongside it does the heavy lifting for deep packet inspection — matching 202 signatures across 13 attack families — and when something hits, it pushes the attacker's IP directly into a kernel map to block all future traffic. There's also a browser HUD that shows everything in real time.
 
 ![Hakam HUD](demo/hakam-hud.thumbnail.png)
 
@@ -27,7 +27,7 @@ A userspace engine running alongside it does the heavy lifting for deep packet i
     ▼
  hakam-node  (userspace, tokio)
     • reads PAYLOAD_EVENTS ring buffer
-    • 203-pattern DPI  →  match → push IP into BLOCKLIST map
+    • 202-pattern DPI  →  match → push IP into BLOCKLIST map
     • interactive CLI: block / unblock / stats / clear
     • WebSocket server → browser HUD
 ```
@@ -52,7 +52,7 @@ Raw CSVs: [`bench/results/`](bench/results/) · Reproduce steps: [`bench/README.
 
 ## Signatures
 
-203 patterns across 12 families, matched case-insensitively against the first 64 bytes of each TCP segment.
+202 patterns across 13 families, matched case-insensitively against the first 64 bytes of each TCP segment.
 
 | Family | Examples |
 |--------|---------|
@@ -62,7 +62,7 @@ Raw CSVs: [`bench/results/`](bench/results/) · Reproduce steps: [`bench/README.
 | LFI | `../`, `..%2F`, `%2E%2E%2F`, `/ETC/PASSWD` |
 | SSRF | `FILE://`, `DICT://`, `GOPHER://` |
 | Log4Shell | `${JNDI:` |
-| + 6 more | XXE, NoSQLi, SSTI, WebShell, Recon, CVE |
+| + 7 more | XXE, NoSQLi, SSTI, WebShell, Recon, CVE, Deserial |
 
 ---
 
@@ -85,7 +85,7 @@ cd hakam-ui && npm install && npm run dev
 # Open http://localhost:5173 in a browser
 
 # ── Fire attacks (VM, third terminal) ──────────────────────────────────────
-./scripts/demo-cycle.sh          # narrated 6-phase cycle, ~113 s per loop
+./scripts/demo-cycle.sh          # narrated 7-phase cycle, ~4 min per loop
 ```
 
 Full walkthrough with screenshots and troubleshooting: [`start_guide.md`](start_guide.md)  
@@ -115,7 +115,7 @@ hakam-node/     userspace — DPI engine, CLI, WebSocket server
 hakam-ui/       browser HUD — React + Tailwind + WebSocket client
 xtask/          build automation (cargo xtask run / build-ebpf)
 scripts/        demo, bench, preflight, evasion test
-docs/           architecture, codebase, evasion analysis, scripts reference
+docs/           architecture, runtime_flow, codebase, evasion, scripts reference
 bench/          benchmark rig and raw CSV results
 ```
 

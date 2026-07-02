@@ -22,4 +22,5 @@ node_modules/
 repomix-output.txt
 .claude/
 
-start_guide.md
+# Internal dev notes — worklogs, phase logs, roadmaps, QA prep (kept locally, not shipped)
+docs/dev/

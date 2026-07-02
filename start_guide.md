@@ -110,7 +110,7 @@ This is what makes things light up on the HUD.
 ```bash
 orb -m hakam
 cd ~/hakam
-./scripts/demo-cycle.sh                            # 113 s narrated loop, repeats
+./scripts/demo-cycle.sh                            # ~4 min narrated loop, repeats
 ```
 
 Or drive it manually — see §3.

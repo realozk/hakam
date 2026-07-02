@@ -4,7 +4,7 @@
 >
 > **What this is not.** A file-by-file reference (that's `codebase.md`) or a high-level architecture diagram (that's `architecture.md`).
 >
-> **Reading this with the code.** Function names like `dpi_task` map to `hakam-node/src/main.rs`; symbols like `BLOCKLIST` are eBPF maps in `hakam-ebpf/src/main.rs`. `codebase.md` §9 has the file-to-symbol cross-reference.
+> **Reading this with the code.** Function names like `payload_task` map to `hakam-node/src/dpi.rs`; symbols like `BLOCKLIST` are eBPF maps in `hakam-ebpf/src/main.rs`. `codebase.md` §9 has the file-to-symbol cross-reference.
 
 ---
 
@@ -35,7 +35,7 @@ Before the flows, here's every component that does something at runtime:
 | **CLI stdin loop** | userspace blocking task | Parse `block`/`list`/`stats`/etc. | On every keystroke |
 | **`tokio::broadcast<String>` (cap 512)** | userspace channel | Telemetry bus — every task writes, every WS client reads | Continuous |
 | **HUD `useHakamData()`** | browser | Open WS, parse JSON, derive UI state | On mount, then on every message |
-| **`scripts/demo-cycle.sh`** | bash | Drive the 6-phase narrated attack stream | Manual launch |
+| **`scripts/demo-cycle.sh`** | bash | Drive the 7-phase narrated attack stream | Manual launch |
 
 ---
 
@@ -299,7 +299,7 @@ t = 120 s    ttl_sweep_task           At the next 30-s sweep tick after the
 
 There are three ways an entry lands in `BLOCKLIST`:
 
-1. **Auto-block from DPI.** `dpi_task` inserts after a signature hit (see §5).
+1. **Auto-block from DPI.** `payload_task` inserts after a signature hit (see §5).
 2. **Auto-block from rate-limit.** XDP itself inserts when `PACKET_COUNTER[src] > 500` in a 1-s window. No userspace round-trip.
 3. **Manual `block <IP[/prefix]>` CLI.** stdin loop calls `parse_cidr`, `lpm_key`, `blocklist.lock().insert()`, broadcasts `BLOCK` JSON with `category="Manual"`.
 
@@ -310,7 +310,7 @@ After insert, the source IP gets dropped at XDP for *every subsequent ingress pa
 - **Manual `clear`.** CLI iterates the trie, removes every key, broadcasts an UNBLOCK per removed entry, then a single info `EVENT`.
 
 ```
-                        ┌─── DPI hit (dpi_task)        ─┐
+                        ┌─── DPI hit (payload_task)    ─┐
         sources of      ├─── rate-limit overflow (XDP)  │
         BLOCKLIST       ├─── manual `block` CLI          │
         inserts         │                                │
@@ -345,7 +345,7 @@ After insert, the source IP gets dropped at XDP for *every subsequent ingress pa
               writers (everything fans in)         │
         ┌───────────────────────────────┬──────────┼──────────────────────┐
         │                               │          │                      │
-   metrics_ticker            dpi_task  connect_task   stdin CLI loop
+   metrics_ticker         payload_task  connect_task   stdin CLI loop
    1 × METRICS / s             BLOCK   CONNECT   BLOCK / UNBLOCK / EVENT
                               EVENT
                                                   │
@@ -361,7 +361,7 @@ After insert, the source IP gets dropped at XDP for *every subsequent ingress pa
                                        React state update
 ```
 
-- **Cap 512 messages.** A WS client that lags will receive a `RecvError::Lagged(n)` log warning; the message is dropped for that client. `dpi_task` and friends keep moving.
+- **Cap 512 messages.** A WS client that lags will receive a `RecvError::Lagged(n)` log warning; the message is dropped for that client. `payload_task` and friends keep moving.
 - **No backpressure to the kernel.** Even if all WS clients disconnect, the broadcast channel still drains (no subscribers means each `tx.send` returns the count `0`). The kernel never stalls.
 - **All messages are line-delimited JSON.** Five `type` values: `METRICS`, `BLOCK`, `UNBLOCK`, `CONNECT`, `EVENT`. The HUD switches on the type and updates a different piece of state for each.
 
@@ -433,46 +433,51 @@ This is what makes the demo's COOLDOWN phase visibly "decay" the level on screen
 
 ## 9 · Demo cycle lifecycle (`scripts/demo-cycle.sh`)
 
-The cycle is a pure attack driver — it knows nothing about hakam-node, only about the network. It fires HTTP requests through `nc` from rotating source IPs and lets the kernel + HUD do the rest. One full cycle = ~113 s.
+The cycle is a pure attack driver — it knows nothing about hakam-node, only about the network. It fires HTTP requests through `nc` from rotating source IPs and lets the kernel + HUD do the rest. A **continuous benign background stream** (`benign-traffic.sh -c -d 250`, started once at cycle entry and killed on exit) runs under every phase, so attacks always land on top of real traffic. One full cycle = **~228 s (~4 min)**. Threat level rises gradually and then decays — no hard spikes.
 
 ```
-cycle N starts
+cycle N starts   (benign background traffic running the whole time)
   │
-  ├── PHASE 0  BASELINE (12 s)          countdown_to_next 12 "settling"
-  │                                     └─ no traffic. HUD shows calm.
+  ├── PHASE 0  CALM (15 s)              countdown_to_next 15 "monitoring"
+  │                                     └─ benign only. HUD shows NOMINAL.
   │
-  ├── PHASE 1  FIRST CONTACT (12 s)     fire_one "SQLi" (single shot from one IP)
-  │                                      countdown 8
-  │                                      fire_one "XSS"
-  │                                      countdown 4
-  │                                     └─ 2 BLOCK frames over 12 s.
-  │                                        HakamStatus family bars show 2.
-  │
-  ├── PHASE 2  RECON SWEEP (10 s)       fire_burst "Recon" 8 800
-  │                                     └─ 8 low-severity blocks over 8 s.
+  ├── PHASE 1  PROBING (40 s)           fire_one ×4 (Recon,Recon,SQLi,Recon),
+  │                                      poll_keys 10 between each (~1 per 10 s)
+  │                                     └─ 4 low-severity BLOCK frames.
   │                                        ThreatLevel may step to ELEVATED.
   │
-  ├── PHASE 3  MULTI-VECTOR (24 s)      11 categories, one shot each at 1.7 s spacing
-  │                                     └─ 11 BLOCK frames. HakamStatus family
-  │                                        bars race; PEAK bar wins by count.
+  ├── PHASE 2  INVESTIGATION (48 s)     fire_one ×8 (Recon,SQLi,XSS,LFI,SSRF,
+  │                                      Recon,NoSQLi,XXE), poll_keys 6 (~1 per 6 s)
+  │                                     └─ 8 mixed-family blocks; bars diversify.
   │
-  ├── PHASE 4  PEAK ASSAULT (20 s)      fire_random 100 180   (100 shots, 180 ms apart)
+  ├── PHASE 3  ESCALATION (40 s)        fire_one ×13 (full family spread:
+  │                                      SQLi,XSS,RCE,LFI,SSRF,XXE,Log4Shell,
+  │                                      NoSQLi,SSTI,WebShell,CVE,SQLi,RCE),
+  │                                      poll_keys 3 (~1 per 3 s)
+  │                                     └─ HakamStatus family bars race.
+  │
+  ├── PHASE 4  PEAK (25 s)              fire_random 40 600  (40 shots, 600 ms apart
+  │                                      ≈ 1.7/s over ~24 s)
   │                                     └─ HUD floods. ThreatLevel → SEVERE.
   │                                        Kernel autoblocks IPs as their per-IP
-  │                                        rate exceeds 500/s; further packets
+  │                                        rate crosses 500 pps; further packets
   │                                        from those IPs drop at XDP without
   │                                        userspace involvement.
   │
-  └── PHASE 5  COOLDOWN (35 s)          no traffic.
-                                        └─ HUD's 30-s rolling window empties.
-                                           ThreatLevel decays 1 → 4 → 5.
-                                           ttl_sweep_task starts removing the
-                                           oldest blocks at the 30-s mark.
+  ├── PHASE 5  CONTAINMENT (30 s)       fire_one ×3 (SQLi,Recon,RCE),
+  │                                      poll_keys 10 between each
+  │                                     └─ trickle of stragglers; the HUD's 30-s
+  │                                        rolling window drains, level decays.
+  │
+  └── PHASE 6  RECOVERY (30 s)          countdown_to_next 30 "decaying"
+                                        └─ no attacks. ThreatLevel returns to
+                                           NOMINAL. ttl_sweep_task removes the
+                                           oldest blocks at the 120-s mark.
 
 then loops (cycle N+1).
 ```
 
-The narration banner (`phase_banner` + `countdown_to_next`) prints in the VM terminal so the operator (and the audience) can read the phase name + remaining seconds.
+The narration banner (`phase_banner` + `countdown_to_next`) prints in the VM terminal so the operator (and the audience) can read the phase name + remaining seconds. Live keys while running: `space`=pause, `n`=next, `r`=restart, `0`–`6`=jump, `q`=quit.
 
 ---
 

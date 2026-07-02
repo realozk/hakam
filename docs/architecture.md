@@ -7,7 +7,7 @@
 
 ## 1 · The honest one-liner
 
-> *Hakam is a kernel-resident packet filter (XDP + TC + tracepoint) that samples the first 64 B of every TCP segment into a userspace ring buffer, where a 203-signature Aho-Corasick matcher runs over a per-flow reassembly buffer. On a hit, userspace pushes the source IP into a kernel LPM trie, after which all further traffic from that IP drops at the driver edge.*
+> *Hakam is a kernel-resident packet filter (XDP + TC + tracepoint) that samples the first 64 B of every TCP segment into a userspace ring buffer, where a 202-signature Aho-Corasick matcher runs over a per-flow reassembly buffer. On a hit, userspace pushes the source IP into a kernel LPM trie, after which all further traffic from that IP drops at the driver edge.*
 
 The string match itself is **userspace**. Nothing else makes sense under the eBPF verifier — no string library, no unbounded loops, no regex engine. What's *kernel-resident* is the **drop**, the **rate limit**, the **CIDR blocklist lookup**, and the **payload sample feed**. That's the right answer to *"where does the regex run."*
 
@@ -81,7 +81,7 @@ The string match itself is **userspace**. Nothing else makes sense under the eBP
 
 1. Packet arrives → XDP. Not in BLOCKLIST, not rate-limited → `XDP_PASS`. First 64 B of TCP payload + full 4-tuple (`src_addr`, `dst_addr`, `src_port`, `dst_port`) pushed to `PAYLOAD_EVENTS`.
 2. `payload_task` pulls from the ring, constructs a `FlowKey`, and calls `Reassembler::ingest`. The per-flow buffer (default 256 B cap, 30 s TTL) accumulates segments from the same 4-tuple **in TCP sequence order** (Phase 2 #7) — out-of-order delivery is reordered and retransmits are deduped, using the `seq` the kernel stamps on each event. Separately, XDP records every TCP segment into the kernel `CONNTRACK` flow table (`seq_next`/`last_ts`/`packets`/`dir`), whose live size is surfaced as `active_flows`.
-3. Match runs on the **reassembled view**, not just this segment. First, the HTTP method gate (`GET ` / `POST ` / `PUT ` / `HEAD ` / `DELETE ` / `OPTIONS ` / `PATCH ` / `CONNECT ` / `TRACE `). Then the Aho-Corasick automaton over all 203 signatures (case-insensitive on raw bytes). If that misses, a single-pass URL-decoded view (`%XX` → byte, `+` → space) is scanned as a fallback — so `UNION%20SELECT` and `UNION+SELECT` both hit.
+3. Match runs on the **reassembled view**, not just this segment. First, the HTTP method gate (`GET ` / `POST ` / `PUT ` / `HEAD ` / `DELETE ` / `OPTIONS ` / `PATCH ` / `CONNECT ` / `TRACE `). Then the Aho-Corasick automaton over all 202 signatures (case-insensitive on raw bytes). If that misses, a single-pass URL-decoded view (`%XX` → byte, `+` → space) is scanned as a fallback — so `UNION%20SELECT` and `UNION+SELECT` both hit.
 4. On hit: userspace inserts `(src_addr, /32, boot_time_ns)` into the kernel `BLOCKLIST` LpmTrie via aya, calls `Reassembler::forget(flow)` so the same connection can be re-inspected (HTTP keep-alive), broadcasts `BLOCK` JSON to every WS subscriber, and increments `DpiStats`.
 5. Every subsequent packet from that IP hits the BLOCKLIST branch in XDP and is dropped *before* IP routing.
 6. After 120 s, `ttl_sweep_task` removes the entry and broadcasts `UNBLOCK`.
@@ -144,11 +144,11 @@ The full evasion table (30 mutations, hit/miss verified by `cargo test --test dp
 
 ## 8 · Test coverage
 
-**56 passing tests across 5 targets** (cross-platform — no Linux required):
+**72 passing tests across 5 targets** (cross-platform — no Linux required):
 
 | Target | Count | Pins |
 |--------|------:|------|
-| `hakam-common` lib | 10 | `Ipv4Addr` byte order, std interop, `PayloadEvent` layout (16 + `PAYLOAD_LEN` bytes), `ConnectEvent` layout. |
+| `hakam-common` lib | 12 | `Ipv4Addr` byte order, std interop, `PayloadEvent` layout (24 + `PAYLOAD_LEN` bytes), `ConnectEvent` layout. |
 | `hakam-node` lib · `signatures` | 4 | Uppercase / non-empty / ≤ `PAYLOAD_LEN` / `CATEGORIES`-in-sync invariants. |
 | `hakam-node` lib · `reassembly` | 10 | Concatenation, flow isolation, `forget`, GC eviction, buffer cap, flow cap, retransmit dedupe, out-of-order reassembly. |
 | `hakam-node` lib · `monitor` | 5 | CIDR packing for `MONITOR_CFG` across /0, /16, /24, /32 and the monitor-all sentinel. |
