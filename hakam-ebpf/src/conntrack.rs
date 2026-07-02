@@ -31,7 +31,7 @@ pub fn observe(key: &FlowKey, seq: u32, wire_len: u32) -> u8 {
     let now = unsafe { bpf_ktime_get_ns() };
     let new_end = seq.wrapping_add(wire_len);
 
-    if let Some(st) = unsafe { CONNTRACK.get_ptr_mut(key) } {
+    if let Some(st) = CONNTRACK.get_ptr_mut(key) {
         let prev = unsafe { (*st).seq_next };
         let flag = match seq.wrapping_sub(prev) as i32 {
             0 => FLOW_IN_ORDER,

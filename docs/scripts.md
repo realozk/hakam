@@ -23,6 +23,29 @@ Also relaxes `rp_filter` on `dummy0` so spoofed-source packets aren't silently d
 
 ---
 
+### `arsenal-demo.sh`
+**The Arsenal pitch — the 3-minute story you run when a reviewer stops walking.** Where `demo-cycle.sh` is the ambient attract-loop, this narrates the layered-firewall differentiator in three acts, ending on `stats`. It's the terminal companion to the demo video (#16).
+
+| Act | Layer | What the audience sees |
+|-----|-------|------------------------|
+| I · THE WIRE | XDP | A SQLi from an external host is dropped in the driver, pre-stack. |
+| II · THE IDENTITY | attribution | The same block names the originating **PID + process** — the marquee line *"blocked SQLi from 10.99.1.13, originating PID N / nc"*. |
+| III · THE SYSCALL | BPF-LSM | A local `connect()` to an armed destination returns **EPERM in ~0 ms** — the packet is never created. |
+| IV · THE PROOF | conntrack | Guides you to `stats`: active flows, kernel drops, sub-µs latency, zero false positives. |
+
+Acts I/II are fully driven by the script (it fires the attacks and reads the BLOCK straight off the WebSocket feed). Act III needs one line typed in the Hakam console — `policy-block <target>` — which the script detects and continues from; that keystroke *is* the demo (arming an exfil-denial rule live).
+
+```bash
+./scripts/arsenal-demo.sh              # presenter-paced (ENTER between beats)
+./scripts/arsenal-demo.sh --auto       # hands-free timed pacing (for screen recording)
+./scripts/arsenal-demo.sh --fast       # halve every pause
+# env overrides: TARGET, PORT, WS_HOST, WS_PORT, WIRE_SRC, ID_SRC
+```
+
+Prerequisites: `hakam-node` running, `setup-demo.sh` has run, `nc`, `curl`. Optional: `websocat` (live BLOCK overlay; without it the console/HUD still shows everything).
+
+---
+
 ### `demo-cycle.sh`
 **The main demo driver.** Loops through 6 phases (~113 s per cycle) that take the threat level from NOMINAL → SEVERE → back, exercising every visual on the HUD. Blends benign traffic into every phase (5:1 benign:attack ratio during calm phases, 1:1 during PEAK).
 
@@ -252,7 +275,8 @@ cargo xtask run --iface lo --mode skb
 ./scripts/preflight.sh
 
 # VM — in a second terminal, when you're ready
-./scripts/demo-cycle.sh
+./scripts/arsenal-demo.sh      # the 3-act pitch (reviewer stopped at the booth)
+./scripts/demo-cycle.sh        # OR the ambient attract-loop (booth screen on repeat)
 
 # VM — optional side terminal (proves HUD isn't lying)
 ./scripts/bpftrace-overlay.sh drops

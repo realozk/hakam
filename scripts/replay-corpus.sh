@@ -4,7 +4,8 @@
 #
 # Usage:
 #   1. Start hakam-node on an interface (fresh, so the blocklist is empty):
-#        sudo cargo xtask run --iface lo --mode skb
+#        cargo xtask run --iface lo --mode skb   # run as your user, no sudo prefix
+#        # (xtask sudoes only the binary launch; it prompts for your password)
 #        # or a packaged deploy: sudo systemctl start hakam   /   docker run …
 #   2. Replay the corpus:
 #        ./scripts/replay-corpus.sh

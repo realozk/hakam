@@ -6,7 +6,7 @@ no external corpora to download.
 
 ```bash
 # 1. run hakam-node on an interface (fresh, empty blocklist):
-sudo cargo xtask run --iface lo --mode skb        # or systemctl start hakam / docker run
+cargo xtask run --iface lo --mode skb             # run as your user (no sudo prefix); or systemctl start hakam / docker run
 # 2. replay every capture and assert each is blocked:
 ./scripts/replay-corpus.sh
 ```

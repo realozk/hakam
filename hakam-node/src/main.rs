@@ -377,6 +377,7 @@ fn attach_tracepoint(bpf: &mut Ebpf) -> Result<()> {
 // BPF-LSM socket_connect enforcement (Arsenal roadmap Phase 2 #6). Degrades to
 // observe-only (tracepoint stays active) if the kernel lacks BPF-LSM, so the
 // demo never hard-fails on a reviewer's box — it just loses enforcement.
+#[cfg(feature = "linux")]
 fn attach_lsm(bpf: &mut Ebpf) -> Result<()> {
     let lsm_unavailable = |reason: &str| {
         warn!("BPF-LSM connect() enforcement disabled: {reason}");

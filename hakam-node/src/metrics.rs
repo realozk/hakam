@@ -59,11 +59,30 @@ pub async fn ticker(
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     let mut prev_iface = read_iface_bytes(&iface).await.unwrap_or((0, 0));
+    let mut prev_cpu = read_cpu_times().await;
 
     loop {
         interval.tick().await;
 
-        let cpu = read_cpu_usage_percent().await.unwrap_or(0.0);
+        // CPU busy % over the last tick: delta of busy/total between two
+        // /proc/stat snapshots. A single snapshot only yields the average since
+        // boot (a near-static number), so we diff against the previous tick.
+        let cpu = match (read_cpu_times().await, prev_cpu) {
+            (Some(curr), Some(prev)) => {
+                let total_d = curr.1.saturating_sub(prev.1);
+                let idle_d = curr.0.saturating_sub(prev.0);
+                prev_cpu = Some(curr);
+                if total_d == 0 {
+                    0.0
+                } else {
+                    100.0 * (1.0 - idle_d as f32 / total_d as f32)
+                }
+            }
+            (curr, _) => {
+                prev_cpu = curr;
+                0.0
+            }
+        };
 
         let dropped: u64 = {
             let map = drop_counter.lock().await;
@@ -106,7 +125,11 @@ pub async fn ticker(
     }
 }
 
-async fn read_cpu_usage_percent() -> Option<f32> {
+/// Reads the aggregate CPU line from `/proc/stat`, returning `(idle_ticks,
+/// total_ticks)` cumulative since boot. The caller diffs two samples to get the
+/// busy percentage over an interval. `idle` folds in iowait (field 5) the same
+/// way `top` does.
+async fn read_cpu_times() -> Option<(u64, u64)> {
     use tokio::fs;
     let content = fs::read_to_string("/proc/stat").await.ok()?;
     let line = content.lines().next()?;
@@ -118,12 +141,10 @@ async fn read_cpu_usage_percent() -> Option<f32> {
     if nums.len() < 4 {
         return None;
     }
-    let idle = nums[3];
+    // Fields: user nice system idle iowait irq softirq steal ...
+    let idle = nums[3] + nums.get(4).copied().unwrap_or(0);
     let total: u64 = nums.iter().sum();
-    if total == 0 {
-        return None;
-    }
-    Some(100.0 - (idle as f32 / total as f32 * 100.0))
+    Some((idle, total))
 }
 
 async fn read_iface_bytes(iface: &str) -> Option<(u64, u64)> {
