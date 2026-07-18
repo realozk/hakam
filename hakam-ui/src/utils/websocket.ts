@@ -118,8 +118,8 @@ export const THREAT_LEVEL_META: Record<ThreatLevel, { label: string; color: stri
   5: { label: 'NOMINAL',  color: '#10b981', sub: 'No active threats' },
   4: { label: 'ELEVATED', color: '#22d3ee', sub: 'Light recon traffic'  },
   3: { label: 'GUARDED',  color: '#fbbf24', sub: 'Multiple intercepts in progress'  },
-  2: { label: 'HIGH',     color: '#f97316', sub: 'Sustained attack pressure'  },
-  1: { label: 'SEVERE',   color: '#ef4444', sub: 'Heavy multi-vector assault'  },
+  2: { label: 'HIGH',     color: '#f97316', sub: 'Sustained inbound attacks'  },
+  1: { label: 'SEVERE',   color: '#ef4444', sub: 'Multiple attack families active'  },
 };
 
 export type GlobalMetrics = {
@@ -127,7 +127,7 @@ export type GlobalMetrics = {
   cpu: number;
   latency: number;          // p50 ns
   latencyP99: number;       // p99 ns
-  packetsAnnihilated: number;
+  packetsDropped: number;
   rxBandwidth: number;      // Gbps
   txBandwidth: number;      // Gbps
   rxHistory: number[];      // Gbps history (last 30 ticks)
@@ -166,7 +166,7 @@ export function useHakamData() {
     cpu: 0,
     latency: 0,
     latencyP99: 0,
-    packetsAnnihilated: 0,
+    packetsDropped: 0,
     rxBandwidth: 0,
     txBandwidth: 0,
     rxHistory: Array(HISTORY_LEN).fill(0),
@@ -332,7 +332,7 @@ export function useHakamData() {
                   cpu,
                   latency: data.latency_p50_ns ?? prev.latency,
                   latencyP99: data.latency_p99_ns ?? prev.latencyP99,
-                  packetsAnnihilated: data.dropped !== undefined ? data.dropped : prev.packetsAnnihilated,
+                  packetsDropped: data.dropped !== undefined ? data.dropped : prev.packetsDropped,
                   rxBandwidth: rxGbps,
                   txBandwidth: txGbps,
                   rxHistory,

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Userspace: the controller, shared types, and the xtask build tool. ──────
+  # Mirrors what runs on a developer box: clippy + the unit/integration test
+  # suite + a real build of the Linux controller (the `linux` feature pulls in
+  # aya/tokio/warp). The eBPF crate is excluded here — it can't be host-compiled
+  # (it targets bpfel-unknown-none) and gets its own job below. That's also why
+  # we don't use `--workspace`: it would drag hakam-ebpf into the host build.
+  userspace:
+    name: Userspace (clippy · test · build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins nightly + rust-src/clippy; rustup honours it.
+      - name: Install pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Default members only (hakam-common, hakam-node, xtask) — see note above.
+      # This lints the portable code paths (feature `linux` off).
+      - name: Clippy — portable (deny warnings)
+        run: cargo clippy --locked -- -D warnings
+
+      # The bulk of the controller (cli, dpi, telemetry, metrics, maintenance)
+      # is gated behind `--features linux`; lint it too, and this doubles as the
+      # real link of the Linux runtime (aya/tokio/warp).
+      - name: Clippy — controller, linux feature (deny warnings)
+        run: cargo clippy --locked -p hakam-node --features linux -- -D warnings
+
+      - name: Test
+        run: cargo test --locked

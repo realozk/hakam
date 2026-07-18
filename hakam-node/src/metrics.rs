@@ -49,6 +49,9 @@ pub fn read_latency_percentiles(hist: &PerCpuArray<MapData, u64>) -> (u64, u64) 
     (p50, p99)
 }
 
+// Takes one handle per kernel map it samples; the aya map types are verbose
+// but each argument is a distinct map, so collapsing them buys nothing.
+#[allow(clippy::type_complexity)]
 pub async fn ticker(
     tx: Sender,
     drop_counter: Arc<Mutex<PerCpuArray<MapData, u64>>>,

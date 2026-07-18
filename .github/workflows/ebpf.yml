@@ -1,0 +1,53 @@
+name: eBPF build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ebpf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Kernel object: compile hakam-ebpf to BPF bytecode. ──────────────────────
+  # This is the environment-sensitive half. `cargo xtask build-ebpf` invokes
+  # `-Z build-std=core --target bpfel-unknown-none`, which needs nightly +
+  # rust-src, and bpf-linker to link the ELF. bpf-linker builds against the
+  # toolchain's bundled LLVM and is the slow step, so it is cached across runs.
+  # A green job here means the BPF verifier-facing bytecode still assembles —
+  # the load-into-kernel step needs a privileged runner and lives in the demo,
+  # not CI.
+  build-ebpf:
+    name: Compile BPF object
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      # bpf-linker links the BPF ELF. Cache the built binary so we don't rebuild
+      # its LLVM bindings (~10 min) on every run; key on the installed version.
+      - name: Cache bpf-linker
+        id: cache-bpf-linker
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/bpf-linker
+          key: bpf-linker-${{ runner.os }}-v0.9
+
+      - name: Install bpf-linker
+        if: steps.cache-bpf-linker.outputs.cache-hit != 'true'
+        run: cargo install bpf-linker --locked
+
+      - name: Build eBPF object
+        run: cargo xtask build-ebpf

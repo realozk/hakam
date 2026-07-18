@@ -1,0 +1,14 @@
+metric,value,unit
+label,hakam-flood,
+workload,flood,
+ts_utc,20260710-025806Z,
+duration,60.519,s
+host_iface,phbench0,
+hakam_listening,1,bool
+host_cpu_pct,5.57,%
+rx_pkts,10071503,pkts
+tx_pkts,3,pkts
+rx_pps,166418.86,pps
+tx_pps,0.05,pps
+rx_bps,15310532,bps
+ws_samples,0,n

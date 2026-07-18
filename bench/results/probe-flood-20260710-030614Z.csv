@@ -1,0 +1,14 @@
+metric,value,unit
+label,probe-flood,
+workload,flood,
+ts_utc,20260710-030614Z,
+duration,15.164,s
+host_iface,phbench0,
+hakam_listening,1,bool
+host_cpu_pct,5.67,%
+rx_pkts,2716704,pkts
+tx_pkts,8,pkts
+rx_pps,179154.84,pps
+tx_pps,0.53,pps
+rx_bps,16482237,bps
+ws_samples,0,n

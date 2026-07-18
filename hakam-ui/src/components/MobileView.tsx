@@ -67,7 +67,7 @@ export const MobileView: React.FC<Props> = ({ threatsBlocked, recentAttacks, wsC
         borderRadius: 'var(--r-large)',
         textAlign: 'center',
       }}>
-        <div className="hk-label" style={{ marginBottom: 8 }}>THREATS_NEUTRALIZED</div>
+        <div className="hk-label" style={{ marginBottom: 8 }}>THREATS_BLOCKED</div>
         <AnimatePresence mode="popLayout" initial={false}>
           <motion.div
             key={threatsBlocked}
@@ -97,9 +97,9 @@ export const MobileView: React.FC<Props> = ({ threatsBlocked, recentAttacks, wsC
           display: 'flex', flexDirection: 'column', gap: 10,
           fontSize: 13, color: 'var(--text)',
         }}>
-          <Bullet>XDP drops malicious packets in <Strong>&lt;10 ns</Strong>, before a socket buffer is allocated.</Bullet>
-          <Bullet><Strong>203 signatures</Strong> across 12 attack families: SQLi, XSS, RCE, LFI, SSRF, Log4Shell, more.</Bullet>
-          <Bullet>Kernel-resident — runs as <Strong>eBPF</Strong> (XDP + TC + tracepoint). Zero userspace cost on the hot path.</Bullet>
+          <Bullet>XDP drops blocked traffic at the driver hook, before a socket buffer is allocated.</Bullet>
+          <Bullet><Strong>202 signatures</Strong> across 13 attack families: SQLi, XSS, RCE, LFI, SSRF, Log4Shell, more.</Bullet>
+          <Bullet>Kernel-resident — runs as <Strong>eBPF</Strong> (XDP + TC + tracepoint). Enforcement stays in-kernel; userspace handles only DPI.</Bullet>
         </ul>
       </section>
 

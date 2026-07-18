@@ -1,5 +1,9 @@
 # Hakam
 
+[![CI](https://github.com/realozk/hakam/actions/workflows/ci.yml/badge.svg)](https://github.com/realozk/hakam/actions/workflows/ci.yml)
+[![eBPF build](https://github.com/realozk/hakam/actions/workflows/ebpf.yml/badge.svg)](https://github.com/realozk/hakam/actions/workflows/ebpf.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > **Kernel-space HTTP threat interception on eBPF/XDP.** Attacks are dropped at the driver edge — before a socket buffer is ever allocated.
 
 Hakam is a kernel-level HTTP threat interceptor I built on top of eBPF. The idea is simple: drop attacks before they ever reach the network stack. No socket buffer gets allocated, no userspace overhead — the kernel just kills the packet at the XDP hook and moves on.
@@ -40,15 +44,30 @@ The string matching happens in **userspace** because the BPF verifier doesn't al
 
 ## Performance
 
-Tested on a `veth` pair in native-mode XDP — the closest you can get to a real NIC inside a VM. Numbers are wall-clock deltas comparing baseline vs. Hakam attached under the same workload.
+Measured on a `veth` pair in **native-mode (driver) XDP** inside a VM — the closest you get to a real NIC without bare metal. Honest caveat up front: absolute packet rates are bound by the VM's software path, not by Hakam, so **the delta between baseline and Hakam is the signal, not the absolute pps.** Methodology, workloads, and raw CSVs: [`bench/`](bench/README.md).
 
-| Workload | Throughput | CPU (no Hakam) | CPU (Hakam) | Overhead |
-|----------|:----------:|:----------------:|:-------------:|:--------:|
-| Flood (UDP, line rate) | 180 k pps | 4.31 % | 4.58 % | **+0.27 %** |
-| DPI (SQLi payloads) | 15 pps | 0.32 % | 0.37 % | **+0.05 %** |
+**Drop latency — read straight from the kernel.** The per-CPU `LATENCY_HIST` map times every XDP drop; these numbers are from **28 million** drops under sustained flood, not a self-reported average:
 
-Drop latency at the XDP layer sits around **~45–50 ns** per packet.  
-Raw CSVs: [`bench/results/`](bench/results/) · Reproduce steps: [`bench/README.md`](bench/README.md)
+| Percentile | XDP drop latency |
+|---|:---:|
+| p50 | below the kernel timer's resolution — a blocklist hit is a single LPM-trie lookup |
+| ~p98 | **≤ 64 ns** |
+| p99 | **≤ 128 ns** |
+
+The drop lands at the driver hook — no `sk_buff` is ever allocated for a blocked packet.
+
+**CPU under load** — three 60-second workloads, medians of 3 runs each:
+
+| Workload | Baseline | Hakam | Reading |
+|---|:---:|:---:|---|
+| UDP flood | 4.9 % @ 134k pps | 5.6 % @ 166k pps | Hakam sustains *higher* pps at ~the same per-packet CPU (≈3.4 %/100k pps vs 3.7 %) — `XDP_DROP` is cheaper than the kernel's closed-port handling |
+| SQLi DPI stream | 0.30 % | 0.22 % | ~18 req/s; the difference is within run-to-run noise |
+
+A single high-rate source isn't shown as a "clean traffic" overhead figure on purpose: it trips Hakam's own 500 pps rate-limiter and auto-blocks itself within a second — real behavior, but not a PASS-path measurement.
+
+**For context, a different tool class.** ModSecurity — an L7 WAF that parses every full request in userspace — publishes ~107k → ~808 req/s once the full OWASP CRS is loaded ([defanator/modsecurity-performance](https://github.com/defanator/modsecurity-performance/wiki)). This is *not* a head-to-head: Hakam samples the first 64 bytes per segment in the kernel instead of parsing whole requests. It's here to frame *where* the cost of inline inspection lives — and why Hakam keeps the enforcement path (drop / deny) in the kernel and the parsing sampled.
+
+Raw CSVs: [`bench/results/`](bench/results/) · Reproduce: [`bench/README.md`](bench/README.md)
 
 ---
 

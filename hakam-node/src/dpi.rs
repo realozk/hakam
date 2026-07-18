@@ -106,7 +106,7 @@ pub async fn payload_task(
 
             events_seen = events_seen.wrapping_add(1);
             let now_ns = boot_time_ns();
-            if events_seen % REASSEMBLY_GC_INTERVAL == 0 {
+            if events_seen.is_multiple_of(REASSEMBLY_GC_INTERVAL) {
                 reassembler.gc(now_ns);
                 // Publish reassembler gauges for the `stats` command.
                 let mut s = stats.lock().await;
@@ -178,7 +178,7 @@ pub async fn payload_task(
             println!();
 
             let trie_key = Key::new(32, u32::from_ne_bytes(ip.octets()));
-            let _ = blocklist.lock().await.insert(&trie_key, &now_ns, 0);
+            let _ = blocklist.lock().await.insert(&trie_key, now_ns, 0);
 
             {
                 let mut s = stats.lock().await;

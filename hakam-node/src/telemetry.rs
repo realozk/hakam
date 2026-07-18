@@ -49,6 +49,9 @@ pub fn event_json(message: &str, level: &str) -> String {
     )
 }
 
+// One argument per field in the BLOCK wire message; grouping them into a struct
+// would just move the same fields behind an extra type for a single call site.
+#[allow(clippy::too_many_arguments)]
 pub fn block_json(
     source: &str,
     target: &str,

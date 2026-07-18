@@ -157,7 +157,7 @@ Re-exports the three platform-independent modules: `monitor`, `reassembly`, `sig
 ### `src/signatures.rs` — DPI signature corpus + matcher
 - `pub struct Sig { pattern, category, action, severity }` — all `&'static str`.
 - `const fn sig(...)` — constructor used to build the table at compile time.
-- `pub const SIGNATURES: &[Sig]` — the corpus. **203 entries** across 13 families: SQLi (~30), XSS (~30), LFI (~20), RCE (~30), SSRF (~15), XXE (~10), Log4Shell (~7), Deserial (3), NoSQLi (~10), SSTI (~10), WebShell (~10), Recon (~15), CVE (~10).
+- `pub const SIGNATURES: &[Sig]` — the corpus. **202 entries** across 13 families: SQLi (~30), XSS (~30), LFI (~20), RCE (~30), SSRF (~15), XXE (~10), Log4Shell (~7), Deserial (3), NoSQLi (~10), SSTI (~10), WebShell (~10), Recon (~15), CVE (~10).
 - `pub const CATEGORIES: &[&str]` — display order for the CLI / HUD.
 - `pub fn category_counts() -> Vec<(&str, usize)>` — used by the `rules` CLI command.
 - `pub fn is_http_request(payload: &[u8]) -> bool` — checks startswith for the 9 HTTP verbs. The gate that decides whether a payload reaches the matcher.

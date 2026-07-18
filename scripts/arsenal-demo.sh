@@ -9,7 +9,8 @@
 #   ACT I   · THE WIRE     — XDP drops the attack in the driver, pre-stack.
 #   ACT II  · THE IDENTITY — the block NAMES the originating PID + process.
 #   ACT III · THE SYSCALL  — BPF-LSM denies the outbound connect() itself:
-#                            the packet is never created. No one else does this.
+#                            the packet is never created — all from one
+#                            self-contained host agent, no CNI, no control plane.
 #   FINALE  · THE PROOF    — live kernel counters: drops, sub-µs latency,
 #                            active conntrack flows, zero false positives.
 #

@@ -271,7 +271,7 @@ async fn main() -> Result<()> {
         let _ = shutdown_rx.await;
     }
 
-    info!("All hooks detached from '{}'. Goodbye.", &args.iface);
+    info!("All hooks detached from '{}'. Goodbye.", args.iface);
     Ok(())
 }
 
@@ -288,7 +288,7 @@ fn attach_xdp(bpf: &mut Ebpf, args: &Args, bpf_path: &std::path::Path) -> Result
     )?;
 
     xdp_prog.attach(&args.iface, args.mode).with_context(|| {
-        format!("Failed to attach XDP to '{}' — is the interface UP?", &args.iface)
+        format!("Failed to attach XDP to '{}' — is the interface UP?", args.iface)
     })?;
 
     let mode_str = if args.mode.bits() == XdpFlags::SKB_MODE.bits() {
@@ -301,7 +301,7 @@ fn attach_xdp(bpf: &mut Ebpf, args: &Args, bpf_path: &std::path::Path) -> Result
         "Auto"
     };
     cli::print_attached(&args.iface, mode_str, bpf_path);
-    info!("XDP program attached to '{}'", &args.iface);
+    info!("XDP program attached to '{}'", args.iface);
     Ok(())
 }
 

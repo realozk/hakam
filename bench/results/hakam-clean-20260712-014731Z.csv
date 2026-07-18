@@ -1,0 +1,14 @@
+metric,value,unit
+label,hakam-clean,
+workload,clean,
+ts_utc,20260712-014731Z,
+duration,60.489,s
+host_iface,phbench0,
+hakam_listening,1,bool
+host_cpu_pct,0.15,%
+rx_pkts,1619,pkts
+tx_pkts,503,pkts
+rx_pps,26.77,pps
+tx_pps,8.32,pps
+rx_bps,1604,bps
+ws_samples,0,n

@@ -1,0 +1,14 @@
+metric,value,unit
+label,hakam-dpi,
+workload,dpi,
+ts_utc,20260710-030158Z,
+duration,60.618,s
+host_iface,phbench0,
+hakam_listening,1,bool
+host_cpu_pct,0.22,%
+rx_pkts,1054,pkts
+tx_pkts,1054,pkts
+rx_pps,17.39,pps
+tx_pps,17.39,pps
+rx_bps,1042,bps
+ws_samples,0,n

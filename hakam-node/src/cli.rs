@@ -255,6 +255,9 @@ fn print_help() {
     println!();
 }
 
+// Fields hold aya map handles whose concrete types are inherently verbose;
+// a type alias per map would hurt readability more than it helps here.
+#[allow(clippy::type_complexity)]
 pub struct CliCtx {
     pub blocklist: Arc<Mutex<LpmTrie<MapData, u32, u64>>>,
     pub connect_policy: Arc<Mutex<LpmTrie<MapData, u32, u64>>>,
@@ -333,7 +336,7 @@ fn cmd_block(ctx: &CliCtx, arg: Option<&str>) {
             let key = lpm_key(ip, prefix);
             let display = format_lpm_key(&key);
             let mut map = ctx.blocklist.blocking_lock();
-            match map.insert(&key, &now_ns, 0) {
+            match map.insert(&key, now_ns, 0) {
                 Ok(_) => {
                     print_block_deployed(&display);
                     let _ = ctx.telemetry.send(block_json(
@@ -400,7 +403,7 @@ fn cmd_policy_block(ctx: &CliCtx, arg: Option<&str>) {
             let key = lpm_key(ip, prefix);
             let display = format_lpm_key(&key);
             let mut map = ctx.connect_policy.blocking_lock();
-            match map.insert(&key, &now_ns, 0) {
+            match map.insert(&key, now_ns, 0) {
                 Ok(_) => {
                     println!(
                         "\n  {}  {}  {}\n",
@@ -573,7 +576,7 @@ fn cmd_rules() {
     );
     println!("  {}", "──────────────────────────────────────────────────────────────".bright_black());
     for (cat, n) in signatures::category_counts() {
-        let bar: String = std::iter::repeat('█').take(n.min(40)).collect();
+        let bar: String = std::iter::repeat_n('█', n.min(40)).collect();
         println!(
             "    {:<11} {:>3}  {}",
             cat.bright_white().bold(),

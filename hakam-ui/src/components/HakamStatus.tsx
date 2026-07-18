@@ -179,10 +179,10 @@ export const HakamStatus: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* ── HERO: THREATS_NEUTRALIZED — the visual anchor ─────────── */}
+      {/* ── HERO: THREATS_BLOCKED — the visual anchor ─────────── */}
       <div>
         <div className="hk-label" style={{ marginBottom: 'var(--sp-1)' }}>
-          THREATS_NEUTRALIZED
+          THREATS_BLOCKED
         </div>
         <div style={{ overflow: 'hidden', lineHeight: 1 }}>
           <AnimatePresence mode="popLayout" initial={false}>
@@ -235,9 +235,9 @@ export const HakamStatus: React.FC<Props> = ({
         fontSize: 'var(--fs-small)',
       }}>
         {([
-          { value: '<10 ns', label: 'drop'      },
-          { value: '203',    label: 'sigs'      },
-          { value: 'zero',   label: 'userspace' },
+          { value: 'XDP+TC', label: 'hooks'     },
+          { value: '202',    label: 'sigs'      },
+          { value: 'LPM',    label: 'blocklist' },
         ] as const).map(({ value, label }) => (
           <div key={label} style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--sp-1)', flex: 1 }}>
             <span className="hk-num" style={{
@@ -397,12 +397,12 @@ export const HakamStatus: React.FC<Props> = ({
           <Cell k="KERNEL_MEM"      v={metrics.kernelMemory === '0.0' ? '—' : `${metrics.kernelMemory} MB`} />
           <Cell k="RING_OVERFLOWS"  v={String(metrics.ringOverflows)}
                 cls={metrics.ringOverflows > 0 ? 'warn' : 'dim'} />
-          <Cell k="PACKETS_DROPPED" v={metrics.packetsAnnihilated.toLocaleString()}
-                cls={metrics.packetsAnnihilated > 0 ? '' : 'dim'} />
+          <Cell k="PACKETS_DROPPED" v={metrics.packetsDropped.toLocaleString()}
+                cls={metrics.packetsDropped > 0 ? '' : 'dim'} />
           <Cell k="PEAK_RATE"
                 v={peakRate.rate > 0 ? `${peakRate.rate.toFixed(2)}/s · ${peakRate.ts}` : '—'}
                 cls={peakRate.rate > 5 ? 'warn' : ''} />
-          <Cell k="SIGNATURES" v="203" />
+          <Cell k="SIGNATURES" v="202" />
         </div>
 
       </div>

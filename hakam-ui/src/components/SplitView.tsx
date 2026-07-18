@@ -129,7 +129,7 @@ export const SplitView: React.FC<Props> = ({
                   BREACHES
                 </div>
                 <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.30)', marginTop: 6, letterSpacing: '0.08em' }}>
-                  All {threatsBlocked} attacks neutralized in kernel space
+                  All {threatsBlocked} attacks blocked in kernel space
                 </div>
               </div>
 
@@ -137,7 +137,7 @@ export const SplitView: React.FC<Props> = ({
               <div style={{ display: 'flex', gap: 12, marginBottom: 32 }}>
                 {[
                   { v: '< 10 ns', l: 'DROP LATENCY' },
-                  { v: '203',     l: 'SIGNATURES'   },
+                  { v: '202',     l: 'SIGNATURES'   },
                   { v: 'ZERO',    l: 'USERSPACE'    },
                 ].map(({ v, l }) => (
                   <div key={l} style={{

@@ -1,0 +1,14 @@
+metric,value,unit
+label,baseline-clean,
+workload,clean,
+ts_utc,20260710-032446Z,
+duration,60.460,s
+host_iface,phbench0,
+hakam_listening,0,bool
+host_cpu_pct,9.97,%
+rx_pkts,17668750,pkts
+tx_pkts,17668751,pkts
+rx_pps,292238.67,pps
+tx_pps,292238.69,pps
+rx_bps,21625660,bps
+ws_samples,0,n
