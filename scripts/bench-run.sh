@@ -31,7 +31,12 @@ NETNS="${NETNS:-phbench-gen}"
 HOST_IF="${HOST_IF:-phbench0}"
 HOST_IP="${HOST_IP:-10.200.0.1}"
 NS_IP="${NS_IP:-10.200.0.2}"
-WS_HOST="${WS_HOST:-localhost}"
+# 127.0.0.1 (not "localhost") on purpose: hakam-node binds its WS server to the
+# IPv4 loopback by default, but "localhost" often resolves to IPv6 ::1 first, so
+# websocat would connect to an address nothing is listening on and receive zero
+# METRICS. Override WS_HOST only if you launched hakam-node with --bind on another
+# address.
+WS_HOST="${WS_HOST:-127.0.0.1}"
 WS_PORT="${WS_PORT:-8080}"
 
 DURATION=60
@@ -137,7 +142,16 @@ if [[ $HAKAM_UP -eq 1 && $WEBSOCAT_OK -eq 1 ]]; then
     echo "ts_ms,cpu,latency_p50_ns,latency_p99_ns,dropped,rx_bps,tx_bps,mem_kb" > "$WS_RAW"
 
     # We don't depend on jq. Inline a tiny python json picker.
-    timeout "$DURATION" websocat -t "ws://${WS_HOST}:${WS_PORT}/ws" 2>/dev/null \
+    # NB: fields are pulled into plain locals *before* the f-string — earlier
+    # versions inlined d.get(\"cpu\") inside the f-string braces, which is a
+    # SyntaxError on Python <= 3.11 ("f-string expression part cannot include a
+    # backslash"). That crashed the sampler on every run and silently produced
+    # header-only .ws.csv files (ws_samples=0). Keep the braces backslash-free.
+    # -u (unidirectional): only copy server→stdout and ignore stdin entirely.
+    # Without it, websocat's stdin hits EOF immediately in this pipe and some
+    # versions tear down the whole session before the first 1s METRICS tick
+    # arrives — connecting successfully but capturing nothing.
+    timeout "$DURATION" websocat -u -t "ws://${WS_HOST}:${WS_PORT}/ws" 2>/dev/null \
       | python3 -u -c '
 import json, sys, time
 for line in sys.stdin:
@@ -148,7 +162,15 @@ for line in sys.stdin:
     except Exception:
         continue
     if d.get("type") != "METRICS": continue
-    print(f"{int(time.time()*1000)},{d.get(\"cpu\",0)},{d.get(\"latency_p50_ns\",0)},{d.get(\"latency_p99_ns\",0)},{d.get(\"dropped\",0)},{d.get(\"rx_bps\",0)},{d.get(\"tx_bps\",0)},{d.get(\"mem_kb\",0)}", flush=True)
+    ts = int(time.time() * 1000)
+    cpu = d.get("cpu", 0)
+    p50 = d.get("latency_p50_ns", 0)
+    p99 = d.get("latency_p99_ns", 0)
+    dropped = d.get("dropped", 0)
+    rxb = d.get("rx_bps", 0)
+    txb = d.get("tx_bps", 0)
+    memkb = d.get("mem_kb", 0)
+    print(f"{ts},{cpu},{p50},{p99},{dropped},{rxb},{txb},{memkb}", flush=True)
 ' >> "$WS_RAW" &
     WS_PID=$!
     info "WS sampler PID=${WS_PID} → ${WS_RAW}"
@@ -363,6 +385,13 @@ if [[ "$WS_SAMPLES" -gt 0 ]]; then
     printf "    %-22s %s ns\n" "hakam p50 (avg)"     "${WS_P50_AVG}"
     printf "    %-22s %s ns  (max ${WS_P99_MAX} ns)\n" "hakam p99 (avg)" "${WS_P99_AVG}"
     printf "    %-22s %s pkts\n" "hakam drops in run" "${WS_DROPPED_DELTA}"
+elif [[ -n "$WS_PID" ]]; then
+    # Sampler was launched (hakam up + websocat present) but captured nothing.
+    # Don't let this fail silently again — a header-only .ws.csv means the WS
+    # sampler died (e.g. websocat couldn't connect, or the python picker crashed).
+    warn "WS sampler ran but captured 0 samples — latency NOT recorded."
+    warn "Check: is hakam-node emitting METRICS? test with:"
+    warn "  websocat -t ws://${WS_HOST}:${WS_PORT}/ws   (expect a METRICS line/sec)"
 fi
 echo
 ok "summary → ${SUMMARY}"

@@ -44,19 +44,16 @@ The string matching happens in **userspace** because the BPF verifier doesn't al
 
 ## Performance
 
-Measured on a `veth` pair in **native-mode (driver) XDP** inside a VM — the closest you get to a real NIC without bare metal. Honest caveat up front: absolute packet rates are bound by the VM's software path, not by Hakam, so **the delta between baseline and Hakam is the signal, not the absolute pps.** Methodology, workloads, and raw CSVs: [`bench/`](bench/README.md).
-
-**Drop latency — read straight from the kernel.** The per-CPU `LATENCY_HIST` map times every XDP drop; these numbers are from **28 million** drops under sustained flood, not a self-reported average:
+**Drop latency — read straight from the kernel.** The per-CPU `LATENCY_HIST` map times every XDP drop; these numbers are accumulated over **41.5 million** drops under sustained flood, not a self-reported average. Latency is a property of the drop path itself — a single LPM-trie lookup at the driver hook — so it holds regardless of the host it's measured on:
 
 | Percentile | XDP drop latency |
 |---|:---:|
-| p50 | below the kernel timer's resolution — a blocklist hit is a single LPM-trie lookup |
-| ~p98 | **≤ 64 ns** |
-| p99 | **≤ 128 ns** |
+| p50 | **48 ns** |
+| p99 | **96 ns** |
 
-The drop lands at the driver hook — no `sk_buff` is ever allocated for a blocked packet.
+`LATENCY_HIST` is a log2-bucketed histogram, so these are bucket midpoints: the median drop lands in the 32–64 ns bucket, the 99th percentile in the 64–128 ns bucket. Read live from the running node with the `stats` command. The drop lands at the driver hook — no `sk_buff` is ever allocated for a blocked packet.
 
-**CPU under load** — three 60-second workloads, medians of 3 runs each:
+**CPU under load** — three 60-second workloads, medians of 3 runs each. Measured on a `veth` pair in **native-mode (driver) XDP** inside a VM, so absolute packet rates are bound by the VM's software path — **read the baseline↔Hakam delta, not the absolute pps.** Methodology and raw CSVs: [`bench/`](bench/README.md).
 
 | Workload | Baseline | Hakam | Reading |
 |---|:---:|:---:|---|

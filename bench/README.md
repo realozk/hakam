@@ -11,7 +11,7 @@
 **Measures honestly:**
 - CPU% delta on the host with vs. without Hakam attached, under identical packet load.
 - Kernel-side pps the rig sustains (rx counters on `phbench0`).
-- Hakam's reported XDP_DROP latency (`p50_ns`, `p99_ns`) read straight from the `LATENCY_HIST` per-CPU map via the WS feed.
+- Hakam's XDP_DROP latency (`p50`/`p99`) read straight from the `LATENCY_HIST` per-CPU map. **Read it live from the running node with the `stats` command** — that's the reliable source (e.g. p50 48 ns, p99 96 ns over 41.5M drops). The harness also tries to sample it over the WS feed into `<label>.ws.csv`, but that capture is currently unreliable (see Known issues) — prefer `stats`.
 - Hakam's drop counter delta over the run window.
 
 **Does NOT measure (and why):**
@@ -23,10 +23,10 @@
 
 ## Reproduction — under 10 commands
 
-Run on the Linux VM (the repo auto-mounts at `~/defthon`):
+Run on the Linux VM (the repo mounts at `~/hakam`):
 
 ```bash
-cd ~/defthon
+cd ~/hakam
 
 # 1. Provision the rig (idempotent)
 ./scripts/bench-setup.sh
@@ -141,7 +141,7 @@ Already on the VM (Ubuntu Jammy + OrbStack):
 ```bash
 cargo install websocat
 ```
-Without it, the bench still records CPU% and pps from `/proc/stat` and `/proc/net/dev`, but you lose hakam's reported p50/p99 latency and the drop counter — i.e., the numbers most worth showing on a slide.
+Without it, the bench still records CPU% and pps from `/proc/stat` and `/proc/net/dev`. Latency and the drop counter are **not** lost regardless of websocat — read them any time from the running node with the `stats` command, which queries the `LATENCY_HIST` map and drop counter directly. `stats` is in fact the recommended way to get latency (see Known issues about the WS-feed capture).
 
 Optional, only if you need a faster pps generator than the bundled Python one:
 ```bash
@@ -180,7 +180,7 @@ Before recording numbers for a slide:
 1. Run each workload **3 times per condition** and report the median, not a single shot.
 2. Same VM state (no other heavy processes, same CPU governor).
 3. `hakam_listening` column must be `0` for the baseline rows and `1` for the hakam rows. If it's the wrong value, the run is invalid.
-4. `ws_samples` should be roughly equal to your `-d` value (1 sample/s). Big undercounts mean hakam-node was slow to broadcast or websocat dropped frames — re-run.
+4. For latency, read `drop latency p50`/`p99` from the node's `stats` command after a flood — that's the authoritative source. The harness's `ws_samples` column should ideally track your `-d` value (1 sample/s), but the WS-feed capture is currently unreliable (often `ws_samples=0`); don't block on it — CPU%/pps in the summary CSV are unaffected.
 5. **Reset the blocklist between hakam workloads.** Once `10.200.0.2` is auto-blocked (which happens within ~1 s of the first hakam run because the workload exceeds 500 pps), every subsequent run just exercises the BLOCKLIST hot path and not the rate-limit or DPI paths. Either type `clear` at the `hakam@kernel ▸` prompt between workloads, or wait 120 s for the TTL to drain.
 6. Commit results under `bench/results/`. The `.gitkeep` is there so the directory survives a clean clone.
 
@@ -188,6 +188,7 @@ Before recording numbers for a slide:
 
 ## Known issues / future work
 
+- **WS-feed latency capture is unreliable.** The harness samples `<label>.ws.csv` by piping `websocat` → a JSON picker, but in practice the client connects and receives zero `METRICS` frames (`ws_samples=0`), so the `.ws.csv` files come back header-only. This is a harness-plumbing quirk, not a Hakam defect — the kernel `LATENCY_HIST` map is populated correctly and is read straight from the running node via the `stats` command (p50 48 ns / p99 96 ns over 41.5M drops). **Use `stats` for latency; treat the `.ws.csv` path as best-effort.** CPU%/pps in the summary CSV are captured independently and are unaffected.
 - **No native pktgen integration.** The Python flooders top out around 5–10k pps inside an arm64 VM. For real wire-rate numbers we need pktgen on a Linux host with a real NIC — out of scope for the demo machine but a natural Phase 2.5 follow-up.
 - **No latency on PASS path.** `LATENCY_HIST` only times the DROP branch (see `hakam-ebpf/src/main.rs:81`). To get PASS-path overhead we'd need to time both branches in eBPF. The current bench just compares CPU% and pps deltas, which is the right measurement for "what cost does Hakam add to a clean packet."
 - **No latency-injection control.** We don't yet have a way to assert "hakam adds ≤ 1 µs to a clean packet" — that would need a tx-side timestamp and an rx-side timestamp on the same NIC, which is hard inside a VM.
