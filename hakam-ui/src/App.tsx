@@ -249,6 +249,46 @@ export default function App() {
               <span key={t} className="hk-tab active">{t}</span>
             ))}
           </div>
+          {/* Fires ONE real attack at the kernel datapath (via the VM's
+              attack-on-demand.sh watcher) so the interception below is genuine. */}
+          <button
+            onClick={() => sendDemoCommand('a')}
+            title="Fire one real attack at the kernel datapath and watch Hakam block it live"
+            style={{
+              marginLeft: 'var(--sp-4)',
+              display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)',
+              padding: '5px 12px',
+              background: 'rgba(255,82,82,0.10)',
+              border: '1px solid rgba(255,82,82,0.45)',
+              borderRadius: 'var(--r-chip)',
+              color: 'var(--danger)',
+              fontSize: 'var(--fs-micro)', fontWeight: 700,
+              letterSpacing: 'var(--ls-label)', cursor: 'pointer',
+              textTransform: 'uppercase', whiteSpace: 'nowrap',
+            }}
+          >
+            ⚡ Simulate Attack
+          </button>
+          {/* Fires a documented EVASION payload (double-encoded) the DPI can't
+              catch; the target reports it reached through → shown as EVADED. */}
+          <button
+            onClick={() => sendDemoCommand('e')}
+            title="Fire an attack Hakam cannot detect (documented evasion) and watch it reach the target undetected"
+            style={{
+              marginLeft: 'var(--sp-2)',
+              display: 'inline-flex', alignItems: 'center', gap: 'var(--sp-1)',
+              padding: '5px 12px',
+              background: 'rgba(245,179,92,0.10)',
+              border: '1px solid rgba(245,179,92,0.45)',
+              borderRadius: 'var(--r-chip)',
+              color: 'var(--warn)',
+              fontSize: 'var(--fs-micro)', fontWeight: 700,
+              letterSpacing: 'var(--ls-label)', cursor: 'pointer',
+              textTransform: 'uppercase', whiteSpace: 'nowrap',
+            }}
+          >
+            ⚠ Simulate Evasion
+          </button>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--sp-5)' }}>

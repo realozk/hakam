@@ -316,7 +316,11 @@ export function useHakamData() {
               setMetrics(prev => {
                 const cpu = typeof data.cpu === 'number' ? data.cpu : prev.cpu;
                 const cpuHistory = [...prev.cpuHistory.slice(1), cpu];
-                const toGbps = (bps: number) => +((bps * 8) / 1_000_000_000).toFixed(2);
+                // Keep full precision here — the display formatter (fmtBps) renders
+                // sub-Mbps values in Mb/s. Rounding to 2 decimals of Gbps at this
+                // stage floored any throughput under ~5 Mbps to exactly 0, so
+                // low-rate demo/DPI traffic (a few KB/s) always showed "0.00 Mb/s".
+                const toGbps = (bps: number) => (bps * 8) / 1_000_000_000;
                 const toMb   = (kb: number)  => ((kb) / 1024).toFixed(1);
 
                 const rxGbps = data.rx_bps !== undefined ? toGbps(data.rx_bps) : prev.rxBandwidth;
@@ -463,6 +467,47 @@ export function useHakamData() {
               edgeTimeoutRef.current = setTimeout(() => {
                 setThreatState(prev => ({ ...prev, edge: null }));
               }, 2500);
+            } else if (data.type === 'EVASION') {
+              // A crafted evasion reached the target — Hakam did NOT block it.
+              // Shown honestly as an amber "reached target" flow (blocked:false),
+              // never counted as a block.
+              const fromRole = roleForIp(data.source);
+              const toRole   = roleForIp(data.target);
+              const category = (data.family || 'SQLi') as AttackFamily;
+              const id = Math.random().toString(36).slice(2);
+              pulseActive(fromRole);
+
+              setThreatState(prev => ({
+                ...prev,
+                edge: {
+                  from: fromRole,
+                  to: toRole,
+                  action: 'EVADED',
+                  payload: data.detail,
+                  category,
+                  severity: 'high' as Severity,
+                  blocked: false,
+                },
+                showCard: true,
+              }));
+
+              setLogs(prev => [{
+                id,
+                time: formatTime(),
+                message: `⚠ EVADED — ${category} from ${data.source} reached target UNDETECTED (Hakam did not block: ${data.detail ?? 'evasion payload'})`,
+                level: 'warn' as LogLevel,
+                role: fromRole,
+                category,
+              }, ...prev].slice(0, 200));
+
+              if (edgeTimeoutRef.current) clearTimeout(edgeTimeoutRef.current);
+              edgeTimeoutRef.current = setTimeout(() => {
+                setThreatState(prev => ({ ...prev, edge: null }));
+              }, 3500);
+              if (cardTimeoutRef.current) clearTimeout(cardTimeoutRef.current);
+              cardTimeoutRef.current = setTimeout(() => {
+                setThreatState(prev => ({ ...prev, showCard: false }));
+              }, 4500);
             } else if (data.type === 'SCENARIO') {
               setScenario({
                 phase: data.phase ?? 0,

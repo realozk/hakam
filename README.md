@@ -4,11 +4,15 @@
 [![eBPF build](https://github.com/realozk/hakam/actions/workflows/ebpf.yml/badge.svg)](https://github.com/realozk/hakam/actions/workflows/ebpf.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Kernel-space HTTP threat interception on eBPF/XDP.** Attacks are dropped at the driver edge — before a socket buffer is ever allocated.
+> **A layered eBPF host firewall in a single Rust binary.** Three kernel enforcement points on one host — packets dropped at the XDP driver hook, outbound connections denied at the `socket_connect` syscall, and every block attributed to the process that opened it.
 
-Hakam is a kernel-level HTTP threat interceptor I built on top of eBPF. The idea is simple: drop attacks before they ever reach the network stack. No socket buffer gets allocated, no userspace overhead — the kernel just kills the packet at the XDP hook and moves on.
+Hakam is a single-host, single-binary firewall built on eBPF — small enough to read end to end. Getting both packet-level *and* process-level enforcement usually means adopting cluster infrastructure (an orchestrator, agents, a control plane). Hakam takes the opposite trade: three kernel enforcement points on one box.
 
-A userspace engine running alongside it does the heavy lifting for deep packet inspection — matching 202 signatures across 13 attack families — and when something hits, it pushes the attacker's IP directly into a kernel map to block all future traffic. There's also a browser HUD that shows everything in real time.
+- **The wire** — an XDP program drops blocklisted sources at the driver hook, before an `sk_buff` is ever allocated, with a per-IP rate limiter behind it.
+- **The syscall** — a BPF-LSM hook on `socket_connect` returns `EPERM` on policy-violating outbound connections, so a reverse shell or exfil channel dies at `connect()` before a single packet exists.
+- **The process** — a `sys_enter_connect` tracepoint plus a lightweight eBPF conntrack correlate a block back to the originating PID and process name — so you see *who* opened the flow, not just which IP.
+
+A userspace engine closes the loop: it reassembles the TCP segments the kernel samples and matches them against 202 signatures across 13 attack families (Aho-Corasick); on a hit it pushes the attacker's IP straight into the kernel blocklist map. A browser HUD shows drops, latency, and flow state in real time. Signature DPI is a supporting layer, not the headline — see [Honest limitations](#honest-limitations).
 
 ![Hakam HUD](demo/hakam-hud.thumbnail.png)
 
@@ -17,28 +21,33 @@ A userspace engine running alongside it does the heavy lifting for deep packet i
 ## How it works
 
 ```
-  NIC / veth
-    │
-    ▼
- [XDP hook]  ◄─ hakam-ebpf (kernel, no_std)
-    │  • BLOCKLIST lookup (LPM trie)  → XDP_DROP  ← no sk_buff ever allocated
-    │  • per-IP rate limit (500 pps)  → auto-block
-    │  • sample first 64 B of TCP     → PAYLOAD_EVENTS ring buffer
-    │
-    ▼  XDP_PASS
-  kernel network stack
-    │
- [TC egress]  ← blocks reverse shells / exfil on the way OUT
-    │
-    ▼
- hakam-node  (userspace, tokio)
-    • reads PAYLOAD_EVENTS ring buffer
-    • 202-pattern DPI  →  match → push IP into BLOCKLIST map
-    • interactive CLI: block / unblock / stats / clear
-    • WebSocket server → browser HUD
+── kernel · hakam-ebpf (no_std) ───────────────────────────────────
+
+  OUTBOUND  connect() ─►  [BPF-LSM socket_connect]
+                            • CONNECT_POLICY (LPM trie) hit → -EPERM
+                            • connection never forms — no packet exists
+                          [sys_enter_connect tracepoint]
+                            • (pid, comm, dst) → process attribution
+
+  INBOUND   NIC / veth ─►  [XDP hook]
+                            • BLOCKLIST (LPM trie) → XDP_DROP  ← no sk_buff
+                            • per-IP rate limit (500 pps) → auto-block
+                            • sample first 64 B of TCP → PAYLOAD_EVENTS ring
+                                  │ XDP_PASS
+                            kernel network stack
+                                  │
+                          [TC egress]  ← kills reverse shells / exfil OUT
+                                  │
+── userspace · hakam-node (tokio) ┼────────────────────────────────
+                                  ▼
+   • reads PAYLOAD_EVENTS ring buffer
+   • reassembles TCP segments in sequence order
+   • 202-signature Aho-Corasick DPI  →  match → push IP into BLOCKLIST
+   • correlates each block → originating PID (attribution)
+   • CLI (block / policy-block / stats)  +  WebSocket → browser HUD
 ```
 
-The string matching happens in **userspace** because the BPF verifier doesn't allow loops or string libraries in kernel programs. But the actual **drop** happens in the kernel — once an attacker is blocked, their traffic never touches the TCP stack again.
+String matching runs in **userspace** — the BPF verifier forbids loops and string libraries in kernel programs. But every **enforcement** decision stays in the kernel: the XDP drop, the LSM `EPERM`, the TC egress kill. Once a source is blocked, its traffic never touches the TCP stack again.
 
 ---
 

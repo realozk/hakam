@@ -241,8 +241,7 @@ pub async fn connect_task(
             let port = u16::from_be(ev.dst_port);
 
             println!(
-                "  {} {} {} {}:{} {}",
-                "⚡".bright_blue(),
+                "  {} {} {}:{} {}",
                 format!("[{}]", comm).bright_blue().bold(),
                 "→".bright_black(),
                 dst.yellow(),

@@ -178,8 +178,11 @@ fn write_demo_cmd(action: &str) {
         return;
     }
     let c = action.chars().next().unwrap();
+    // 'a' = attack-on-demand, 'e' = evasion-on-demand (scripts/attack-on-demand.sh).
+    // The rest are demo-cycle.sh controls: space=pause, n=next, r=restart,
+    // q=quit, digits=jump-to-phase.
     let ok = c == ' '
-        || matches!(c, 'n' | 'N' | 'r' | 'R' | 'q' | 'Q')
+        || matches!(c, 'a' | 'A' | 'e' | 'E' | 'n' | 'N' | 'r' | 'R' | 'q' | 'Q')
         || c.is_ascii_digit();
     if !ok {
         return;
@@ -201,18 +204,24 @@ fn write_demo_cmd(action: &str) {
 
 async fn handle_ws_client(ws: warp::ws::WebSocket, tx: Arc<Sender>) {
     let mut rx = tx.subscribe();
+    let tx_in = Arc::clone(&tx);
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    // Inbound: only handles {"type":"DEMO_CMD","action":"<single char>"};
-    // everything else (ping, malformed) is silently ignored.
+    // Inbound handles two message types:
+    //   {"type":"DEMO_CMD","action":"<char>"}  → written to the demo cmd file.
+    //   {"type":"EVASION", ...}                → a local reporter
+    //     (attack-on-demand.sh) telling us a crafted evasion payload reached the
+    //     target undetected; relay it verbatim to every HUD client so the miss
+    //     is shown honestly. Anything else is ignored.
     let inbound = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
             if let Ok(text) = msg.to_str() {
-                if !text.contains("\"DEMO_CMD\"") {
-                    continue;
-                }
-                if let Some(action) = extract_json_string_field(text, "action") {
-                    write_demo_cmd(&action);
+                if text.contains("\"DEMO_CMD\"") {
+                    if let Some(action) = extract_json_string_field(text, "action") {
+                        write_demo_cmd(&action);
+                    }
+                } else if text.contains("\"EVASION\"") {
+                    let _ = tx_in.send(text.to_string());
                 }
             }
         }
