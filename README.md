@@ -1,7 +1,5 @@
 # Hakam
 
-[![CI](https://github.com/realozk/hakam/actions/workflows/ci.yml/badge.svg)](https://github.com/realozk/hakam/actions/workflows/ci.yml)
-[![eBPF build](https://github.com/realozk/hakam/actions/workflows/ebpf.yml/badge.svg)](https://github.com/realozk/hakam/actions/workflows/ebpf.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **A layered eBPF host firewall in a single Rust binary.** Three kernel enforcement points on one host — packets dropped at the XDP driver hook, outbound connections denied at the `socket_connect` syscall, and every block attributed to the process that opened it.
