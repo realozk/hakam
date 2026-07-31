@@ -14,7 +14,7 @@ Hakam is a single-host, single-binary firewall built on eBPF — small enough to
 
 A userspace engine closes the loop: it reassembles the TCP segments the kernel samples and matches them against 202 signatures across 13 attack families (Aho-Corasick); on a hit it pushes the attacker's IP straight into the kernel blocklist map. A browser HUD shows drops, latency, and flow state in real time. Signature DPI is a supporting layer, not the headline — see [Honest limitations](#honest-limitations).
 
-![Hakam HUD](https://github.com/realozk/hakam/raw/main/bannerH.gif)
+![Hakam HUD](https://github.com/realozk/hakam/raw/main/banner.gif)
 
 
 ---
