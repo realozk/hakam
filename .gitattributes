@@ -1,0 +1,7 @@
+# Keep GitHub's language bar focused on the actual product code.
+# These files still ship and still work — they're just not counted in the
+# repo's language statistics, because they're demo / benchmark / packaging
+# tooling rather than the core engine.
+scripts/**       linguist-vendored
+bench/**         linguist-vendored
+packaging/**     linguist-vendored
