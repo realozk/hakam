@@ -1,9 +1,27 @@
+//! Types shared between the kernel programs and the userspace controller.
+//!
+//! This crate is the wire contract across the kernel/userspace boundary: every
+//! struct here is `#[repr(C)]` and read on one side exactly as it was written on
+//! the other. It builds twice — `no_std` for `hakam-ebpf`, and with the `std`
+//! feature for `hakam-node` — so nothing here may pull in `std` unconditionally.
+//!
+//! Two rules govern every struct below, and the layout tests at the bottom of
+//! this file enforce them:
+//!
+//!   * **Byte order is explicit per field.** Most fields carry on-wire (network)
+//!     byte order untouched, so kernel and userspace derive identical map keys
+//!     with no conversion. `PayloadEvent::seq` is the deliberate exception — the
+//!     kernel byte-swaps it so userspace can order segments arithmetically.
+//!   * **No implicit padding.** Fields are ordered widest-first and padding is
+//!     named explicitly. A BPF map key is hashed over its raw bytes, so an
+//!     uninitialised padding hole would silently break lookups.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub const PAYLOAD_LEN: usize = 64;
 
-/// Conntrack segment classification (Arsenal roadmap Phase 2 #7), computed by
-/// the kernel — which sees *every* TCP segment — and carried in `PayloadEvent.flags`.
+/// Conntrack segment classification, computed by the kernel — which sees
+/// *every* TCP segment — and carried in `PayloadEvent.flags`.
 /// Userspace trusts these rather than re-deriving from its own sequence state,
 /// because it only ever sees the *sampled* subset of segments and so cannot
 /// compute an authoritative `seq_next` itself.
@@ -50,7 +68,7 @@ pub struct ConnectEvent {
     pub _pad:     u16,
 }
 
-/// 4-tuple identifying a TCP flow (Arsenal roadmap Phase 2 #7 — eBPF conntrack).
+/// 4-tuple identifying a TCP flow, as used by the kernel conntrack table.
 ///
 /// Used as the kernel `CONNTRACK` LRU-hash map key and, in std builds, as a
 /// userspace `HashMap` key. Every field holds the on-wire bytes (network byte

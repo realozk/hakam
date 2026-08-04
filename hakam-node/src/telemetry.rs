@@ -1,3 +1,19 @@
+//! WebSocket telemetry feed — the wire protocol between node and HUD.
+//!
+//! Every task that has something to report sends a JSON string into one
+//! broadcast channel, and [`run_ws_server`] fans it out to all connected
+//! clients. Broadcast semantics matter here: a slow client is dropped from the
+//! channel rather than being allowed to stall the datapath, so telemetry can
+//! never apply backpressure to packet processing.
+//!
+//! Messages are built by the `*_json` constructors below rather than a
+//! serialisation framework, which keeps the node free of a serde dependency but
+//! puts the burden of correct escaping on [`json_escape`] — anything
+//! interpolated into a message must go through it. The HUD parses these fields
+//! by name, so the constructors are a real interface: renaming a field breaks
+//! the frontend, and the tests at the bottom of this file pin the wire format
+//! for exactly that reason.
+
 use std::sync::Arc;
 
 use colored::Colorize;
@@ -85,8 +101,8 @@ pub fn block_json(
         s.push_str(&json_escape(sev));
         s.push('"');
     }
-    // Per-process attribution (Arsenal roadmap Phase 2 #8): when the blocked
-    // flow was correlated to the process that initiated the connect(), name it.
+    // When the blocked flow was correlated to the process that initiated the
+    // connect(), name it. Omitted entirely when there is no correlation.
     if let Some(p) = pid {
         s.push_str(r#","pid":"#);
         s.push_str(&p.to_string());

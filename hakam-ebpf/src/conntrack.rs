@@ -1,13 +1,15 @@
-//! Tight-scope eBPF conntrack (Arsenal roadmap Phase 2 #7).
+//! Tight-scope connection tracking in the kernel.
 //!
 //! Per-flow state keyed on the 4-tuple, updated from the XDP fast path. There is
 //! **no TCP state machine**: any TCP segment carrying a payload updates the flow.
+//! The table is an LRU hash, so a flood of unique flows evicts the coldest
+//! entries rather than failing inserts or growing without bound.
 //!
 //! Verifier discipline: `observe` does exactly one map lookup, then a handful of
-//! field writes — no loops, no unbounded memory. If this ever trips the
-//! verifier's complexity limit, the degrade ladder in
-//! `docs/phase2_7_conntrack_plan.md` §4 moves the seq logic to userspace and
-//! shrinks `FlowState`. Keep this function linear.
+//! field writes — no loops, no unbounded memory. Keep this function linear. If
+//! it ever trips the verifier's complexity limit, the degrade path in
+//! `docs/dev/phase2_7_conntrack_plan.md` §4 moves the sequence logic to
+//! userspace and shrinks `FlowState`.
 
 use aya_ebpf::helpers::bpf_ktime_get_ns;
 use hakam_common::{FlowKey, FlowState, FLOW_GAP, FLOW_IN_ORDER, FLOW_RETRANSMIT};

@@ -1,3 +1,26 @@
+//! Ring-buffer consumers: deep packet inspection and process attribution.
+//!
+//! Two long-lived tasks drain the two kernel ring buffers, and the interesting
+//! part is how they combine:
+//!
+//!   * [`payload_task`] reads sampled TCP payloads, feeds them through the
+//!     reassembler so a signature can match across segment boundaries, and on a
+//!     hit writes the source IP into `BLOCKLIST` — which is what actually makes
+//!     the kernel start dropping.
+//!   * [`connect_task`] reads `connect()` tracepoint events and records which
+//!     process opened which destination.
+//!
+//! Neither stream alone can say "process X triggered this block": the payload
+//! path knows the flow but not the process, the connect path knows the process
+//! but not the payload. [`AttributionMap`] bridges them, keyed on
+//! `(dst_addr, dst_port)` — the fields both events carry in identical byte
+//! order, so no conversion is needed to join them.
+//!
+//! That join is a heuristic, and worth knowing before trusting its output: if
+//! two processes reach the same destination and port within the TTL window, the
+//! most recent one wins. Attribution is reported when it is available and simply
+//! omitted when it is not, never guessed.
+
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
 
 use aya::maps::{lpm_trie::Key, LpmTrie, MapData, RingBuf};
@@ -20,20 +43,11 @@ use crate::{
 // linear scan over the flow table.
 const REASSEMBLY_GC_INTERVAL: u64 = 1024;
 
-// ── Per-process attribution (Arsenal roadmap Phase 2 #8) ────────────────────
+// ── Per-process attribution ─────────────────────────────────────────────────
 //
-// The sys_enter_connect tracepoint already gives us (pid, comm, dst_addr,
-// dst_port) for every outbound connect(). The DPI path, when it blocks a flow,
-// knows that flow's destination too. We bridge the two streams here: connect_task
-// records "process P initiated a connect to dst:port"; payload_task, on a BLOCK,
-// looks up the flow's destination to name the originating process.
-//
-// Keyed on (dst_addr, dst_port) — both network byte order, identical in
-// PayloadEvent and ConnectEvent, so no conversion is needed to match them.
-//
-// Honest limitation for Q&A: if two processes connect to the same dst:port
-// inside the TTL window, the most recent one wins — source-port-precise
-// attribution waits on the Phase 2 #7 eBPF conntrack.
+// Source-port-precise attribution would need the kernel conntrack table joined
+// in on the full 4-tuple; this map is the cheaper approximation described in the
+// module docs above.
 
 /// How long a connect()→process mapping stays valid for attributing a BLOCK.
 /// Matches the BLOCKLIST TTL so a blocked flow keeps its origin for its lifetime.
@@ -63,7 +77,7 @@ pub struct DpiStats {
     pub total_http_seen: u64,
     pub total_detections: u64,
     pub by_category: HashMap<&'static str, u64>,
-    // Reassembler gauges (Phase 2 #7), refreshed each GC tick from payload_task.
+    // Reassembler gauges, refreshed each GC tick from payload_task.
     pub reassembly_flows: u64,
     pub retransmit_dropped: u64,
     pub out_of_order: u64,

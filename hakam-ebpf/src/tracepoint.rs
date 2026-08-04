@@ -1,3 +1,20 @@
+//! `sys_enter_connect` tracepoint: attributes outbound connections to processes.
+//!
+//! This is the observability layer, not an enforcement one — it always returns
+//! 0 and never blocks anything. Its job is to answer *who*: the packet-level
+//! hooks see addresses and ports, but only a syscall-level hook can name the
+//! PID and command behind a connection. Userspace joins these events against
+//! DPI detections so a block can report the process that caused it.
+//!
+//! Note this reads with `bpf_probe_read_user`, unlike [`crate::lsm`] which uses
+//! the kernel variant. A tracepoint fires on syscall *entry*, while the
+//! `sockaddr` is still the caller's own userspace buffer; the LSM hook runs
+//! later, after the kernel has copied it inward.
+//!
+//! Because it is system-wide by default, `MONITOR_CFG` can narrow it to one
+//! CIDR — otherwise routine DNS, package-manager, and resolver traffic drowns
+//! out anything interesting.
+
 use aya_ebpf::{
     helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_user},
     programs::TracePointContext,
@@ -6,6 +23,9 @@ use hakam_common::ConnectEvent;
 
 use crate::{AF_INET, CONNECT_EVENTS, MONITOR_CFG, TP_OFF_USERVADDR};
 
+// Prefix of the userspace `struct sockaddr_in`. Declared separately from the
+// LSM hook's identical struct because the two read from different address
+// spaces and are intentionally not coupled.
 #[repr(C)]
 struct SockaddrIn {
     sin_family: u16,

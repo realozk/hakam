@@ -1,7 +1,11 @@
-# Reviewing Hakam — one Linux box, three commands, no build
+# Reviewing Hakam — one Linux box, one build, three commands
 
 This is the fastest way to watch Hakam block a real attack at the kernel edge.
-No source build, no UI, no second machine.
+No toolchain to install, no UI, no second machine.
+
+You build the image yourself — but the build happens **inside a container**, so
+nothing lands on your host: no Rust, no nightly, no LLVM, no `bpf-linker`. The
+one-time build takes roughly ten minutes; everything after it is seconds.
 
 > ### ⚠️ Read this first: you need a real Linux kernel
 > Hakam is an **eBPF/XDP** tool — its programs load into the Linux kernel, like
@@ -15,21 +19,30 @@ No source build, no UI, no second machine.
 
 - **One Linux host** — bare metal, a VM, or a cloud instance. Kernel **≥ 5.8**.
 - **Docker**, and **root** (eBPF/XDP attaches to the host kernel).
-- The arch of the tarball you load must match the host: `hakam-amd64.tar.gz` for
-  `x86_64`, `hakam-arm64.tar.gz` for `aarch64`. Both are shipped.
-- That's it. The image carries the datapath, the controller, and a bundled
-  attack + benign traffic harness.
+- ~10 min for the one-time image build, and a few GB of disk for it.
+- That's it — no Rust toolchain on the host. The image it produces carries the
+  datapath, the controller, and a bundled attack + benign traffic harness.
 
-## 1 · Load the prebuilt image (no compile)
+Builds on `x86_64` and `aarch64` alike; the image is built for whatever host you
+build it on, so there is no architecture to match.
+
+## 1 · Build the image
+
+From the repo root:
 
 ```bash
-gunzip -c hakam-amd64.tar.gz | docker load     # or hakam-arm64.tar.gz on aarch64
+git clone https://github.com/realozk/hakam.git && cd hakam
+docker build -f packaging/docker/Dockerfile -t hakam:latest .
 ```
+
+The slow part is `cargo install bpf-linker`, which compiles LLVM bindings. It is
+also the step most sensitive to toolchain versions — which is exactly why it runs
+inside the pinned builder image rather than on your machine.
 
 ## 2 · Arm Hakam + stand up a self-contained target
 
 ```bash
-sudo HAKAM_DEMO=1 ./run.sh
+sudo HAKAM_DEMO=1 ./packaging/docker/run.sh
 ```
 
 `HAKAM_DEMO=1` builds a loopback test network (`dummy0` + IP aliases + a no-op
@@ -39,7 +52,18 @@ now have the **interactive Hakam CLI** live in this terminal. Useful commands:
 
 ## 3 · Fire attacks and watch them drop
 
-In a **second terminal**:
+In a **second terminal**. If you only run one thing, run this — a narrated
+7-phase cycle (~4 min per loop) that walks through each attack family, shows the
+blocks landing, and lets the TTL expire so you see sources released again:
+
+```bash
+docker exec -it hakam /opt/hakam/scripts/demo-cycle.sh
+```
+
+Terminal 1 is the Hakam CLI; watch the `▼ INTERCEPT` lines appear there as the
+cycle fires. Ctrl-C the cycle whenever you've seen enough.
+
+For a single targeted shot instead:
 
 ```bash
 docker exec -it hakam /opt/hakam/scripts/seclist-attack.sh -k SQLi -n 5
@@ -56,7 +80,34 @@ Try other families or the full firehose:
 docker exec -it hakam /opt/hakam/scripts/seclist-attack.sh -l          # list families
 docker exec -it hakam /opt/hakam/scripts/seclist-attack.sh -n 50       # 50 random shots
 docker exec -it hakam /opt/hakam/scripts/seclist-attack.sh -k XSS -n 20
+
 ```
+
+Every script above ships inside the image — nothing to copy in.
+
+### Firing attacks one at a time
+
+`attack-on-demand.sh` is a **watcher**, not a one-shot command: it starts, prints
+a banner, and waits for single-character commands in `/tmp/hakam-demo.cmd`. It
+takes no flags. Normally the HUD's ⚡ button writes those characters — but with no
+UI you can write them yourself:
+
+```bash
+# Terminal 2 — leave this running (Ctrl-C to stop)
+docker exec -it hakam /opt/hakam/scripts/attack-on-demand.sh
+
+# Terminal 3 — fire one attack, then one deliberate evasion
+docker exec hakam sh -c 'echo a > /tmp/hakam-demo.cmd'
+docker exec hakam sh -c 'echo e > /tmp/hakam-demo.cmd'
+```
+
+`a` fires a random signature-carrying payload — Hakam blocks it. `e` fires a
+double-URL-encoded SQLi that Hakam **deliberately misses**, because it decodes
+only one layer; the payload reaches the target and the script says so. That miss
+is real and documented, not a bug — see [Honest limitations](../../README.md#honest-limitations).
+
+> Don't run `attack-on-demand.sh` and `demo-cycle.sh` at the same time — both
+> drain the same command file.
 
 ## Prove zero false positives
 
@@ -82,23 +133,23 @@ You don't need a Linux machine of your own — you need Linux *somewhere*. Pick 
 **Cloud instance (easiest, matches the amd64 image):**
 
 ```bash
-# Launch any Ubuntu 22.04+ x86_64 instance (EC2 t3.small, DigitalOcean, GCP…),
+# Launch any Ubuntu 22.04+ instance (EC2 t3.small, DigitalOcean, GCP…),
 # then on the box:
 curl -fsSL https://get.docker.com | sh              # if Docker isn't preinstalled
-# scp the tarball up (or wget it), then follow steps 1–3 above.
+# then follow steps 1–3 above.
 ```
 
-Cloud instances are `x86_64`, so `hakam-amd64.tar.gz` loads with no arch fuss.
+Give it **2 GB RAM and a few GB of disk** — the image build is the heaviest part,
+and a 1 GB instance can OOM partway through compiling `bpf-linker`.
 
 **Local Linux VM:**
 
-- **macOS:** [Multipass](https://multipass.run) (`multipass launch --name hakam --cpus 2 --memory 2G 22.04`) or UTM/VirtualBox/VMware/Parallels.
+- **macOS:** [Multipass](https://multipass.run) (`multipass launch --name hakam --cpus 2 --memory 4G --disk 20G 22.04`) or UTM/VirtualBox/VMware/Parallels.
 - **Windows:** VirtualBox/VMware/Hyper-V. (WSL2 *may* work — it's a real kernel —
   but its default build often lacks XDP/BPF-LSM, so a full VM is the safe bet.)
 
-> **Apple Silicon Macs:** a *local* Linux VM there is `arm64`, so load
-> `hakam-arm64.tar.gz`. Simpler still: use an `amd64` cloud instance and the
-> default `hakam-amd64.tar.gz`.
+Architecture takes care of itself: you build the image on the host you run it on,
+so `x86_64` and Apple Silicon `arm64` both work with the same commands.
 
 ## Honest notes for the reviewer
 
@@ -108,8 +159,10 @@ Cloud instances are `x86_64`, so `hakam-amd64.tar.gz` loads with no arch fuss.
   still run and still block. Nothing hard-fails.
 - **SKB (generic) XDP** is used here so it runs on any interface. Native-mode
   driver XDP on a physical NIC is a separate benchmark, not this demo.
-- Both `hakam-amd64.tar.gz` and `hakam-arm64.tar.gz` are shipped — load the one
-  matching your host (`uname -m`: `x86_64` → amd64, `aarch64` → arm64).
+- **The build is the one slow step**, and it is deliberate: compiling inside the
+  pinned `rust:1-bookworm` builder is what keeps your host free of a nightly Rust
+  toolchain and an LLVM install. If a build ever fails, it is almost always
+  `cargo install bpf-linker` — see the note in `packaging/docker/Dockerfile`.
 
 ## Optional — the dashboard
 

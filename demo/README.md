@@ -24,7 +24,7 @@ Inside the VM:
 
 ```bash
 sudo apt install asciinema
-cd ~/defthon
+cd ~/hakam
 ./scripts/setup-demo.sh
 
 # Start a recording. Quit hakam-node (`q`) and demo-cycle (Ctrl-C) when

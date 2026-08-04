@@ -1,85 +1,187 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 // SAIF scientific poster (ملصق علمي) — reachable at /poster.
 //
-// HOW TO FILL IT: edit the `C` object below. Text is Arabic (RTL); technical
-// terms and numbers stay LTR. Everything you'd change lives in `C` — the JSX
-// underneath just lays it out. Print / export to PDF with the button top-left
-// (or Cmd/Ctrl+P → "Save as PDF"). Page size is set for A1 portrait in the
-// print stylesheet at the bottom of this file; change `size:` there for A0/A2.
+// BILINGUAL: the same layout renders in Arabic (RTL, default) or English
+// (LTR). Toggle with the button top-left, or link straight to a language
+// with /poster?lang=en · /poster?lang=ar.
+//
+// HOW TO FILL IT: edit the `CONTENT` object below — `ar` and `en` are mirrors
+// of each other, so keep them in sync when you change one. Technical terms and
+// numbers stay LTR in both. The JSX underneath just lays it out. Print /
+// export to PDF with the button top-left (or Cmd/Ctrl+P → "Save as PDF").
+// Page width is set for A1 portrait in the print stylesheet at the bottom of
+// this file; change `size:` there for A0/A2.
 
-const C = {
-  // ── Header ────────────────────────────────────────────────────────────
-  title: "حَكَم",
-  titleLatin: "Hakam",
-  subtitle: "جدار حماية سيبراني  في عمق النواة (eBPF) ",
-  chips: ["XDP", "BPF-LSM",  "eBPF", "Rust"],
+const CONTENT = {
+  ar: {
+    // ── Chrome (buttons / hints — not part of the printed poster) ─────────
+    ui: {
+      print: "🖨 طباعة / حفظ PDF",
+      hint: "عدّل النصوص في كائن CONTENT أعلى ملف Poster.tsx",
+      toggle: "English",
+      toggleTitle: "Switch to the English version",
+    },
 
-  author: "عمر زيد الزهراني",
-  org: "تخصص علوم حاسب — جامعة أم القرى",
-  event: "مسابقة سيف (SAIF)",
+    // ── Header ────────────────────────────────────────────────────────────
+    title: "حَكَم",
+    titleAlt: "Hakam",
+    subtitle: "جدار حماية سيبراني  في عمق النواة (eBPF) ",
+    chips: ["XDP", "BPF-LSM", "eBPF", "Rust"],
 
-  // ── Sections (edit freely; each is a titled card) ──────────────────────
-  intro: {
-    title: "المقدمة والمشكلة",
-    bullets: [
-      "تستهلك المنشآت اليوم موارد هائلة لبناء بنيات تحتية معقدة (Clusters) لتحقيق الأمان بناءً على مبدأ «افتراض الاختراق».",
-      "تأتي هذه الحماية على حساب سرعة الأداء وسلاسة العمل، حيث تعاني الأنظمة من البطء بسبب تفكيك وفحص كل حزمة بيانات في مساحة المستخدم.",
-      "الخوادم المفردة والأجهزة الطرفية تعجز عن تحمل تكلفة وتعقيد هذه الحلول، مما يتركها عرضة للتهديدات أو بضوابط أمنية ضعيفة.",
-    ],
+    author: "عمر زيد الزهراني",
+    org: "تخصص علوم حاسب — جامعة أم القرى",
+    event: "مسابقة سيف (SAIF)",
+
+    // ── Sections (edit freely; each is a titled card) ──────────────────────
+    intro: {
+      title: "المقدمة والمشكلة",
+      bullets: [
+        "تستهلك المنشآت اليوم موارد هائلة لبناء بنيات تحتية معقدة (Clusters) لتحقيق الأمان بناءً على مبدأ «افتراض الاختراق».",
+        "تأتي هذه الحماية على حساب سرعة الأداء وسلاسة العمل، حيث تعاني الأنظمة من البطء بسبب تفكيك وفحص كل حزمة بيانات في مساحة المستخدم.",
+        "الخوادم المفردة والأجهزة الطرفية تعجز عن تحمل تكلفة وتعقيد هذه الحلول، مما يتركها عرضة للتهديدات أو بضوابط أمنية ضعيفة.",
+      ],
+    },
+    objective: {
+      title: "الهدف والحل المبتكر",
+      bullets: [
+        "«حَكَم» يقلب المعادلة: جدار حماية يعمل في أعمق نقطة بالنظام (Kernel) بتقنية eBPF، ليوفر أقصى درجات الحماية دون استنزاف موارد الخادم.",
+        "تقديم المنظومة بلغة Rust (صفر تعقيد تشغيلي)، يمكن نشره في دقائق على أي نظام Linux (5.15 فأحدث).",
+      ],
+    },
+    // The three kernel enforcement points — the heart of the poster.
+    layers: {
+      title: "المعمارية — ثلاث نقاط إنفاذ أمنية صارمة في النواة",
+      items: [
+        {
+          tag: "عند السلك · XDP",
+          text: "يُسقط برنامج XDP حركة المرور المعادية فور وصولها لكرت الشبكة وقبل تخصيص أي ذاكرة (sk_buff)، مما يوقف الاستنزاف المالي السحابي.",
+        },
+        {
+          tag: "عند محاوله الاتصال بالنظام · BPF-LSM",
+          text: "خطّاف socket_connect يرفض الاتصالات الخارجية المخالفة   — قنوات الاتصال العكسية (Reverse Shells) تُقتل قبل ولادة أي حزمة.",
+        },
+        {
+          tag: "عند العملية · Tracepoint",
+          text: "نقطة التتبّع sys_enter_connect تربط كل عملية حظر بالجهة التي أنشأتها (PID والاسم)، مما يمنح رؤية دقيقة للتهديدات الداخلية.",
+        },
+      ],
+      note: "يوجد محرك يطابق 202 توقيع لـ 13 عائلة هجومية ويتم رفضهم ويحدث قائمه الحظر فوريًا.",
+    },
+    // ── Results — real, kernel-measured numbers (already correct) ───────────
+    results: {
+      title: "النتائج ومؤشرات الأداء",
+      stats: [
+        { value: "48", unit: "ns", label: "زمن الاستجابة · p50" },
+        { value: "96", unit: "ns", label: "زمن الاستجابة · p99" },
+        { value: "41.5M", unit: "", label: "عملية إسقاط مختبرة" },
+        { value: "1", unit: "Binary", label: "ملف تشغيل شامل بـ Rust" },
+      ],
+      note: "الأرقام مقيسة مباشرة من خريطة LATENCY_HIST داخل النواة تحت ضغط حقيقي. يحقق حَكَم إنتاجية حزمٍ أعلى بكلفة معالجةٍ أقل مقارنة بالأنظمة غير المحمية.",
+      figureCaption: "واجهة Hakam الحيّة (HUD): لوحة التحكم التفاعلية والمخطط الشبكي أثناء التشغيل",
+    },
+    conclusion: {
+      title: "الخلاصة والأثر",
+      bullets: [
+        "الابتكار ليس في تعقيد الأنظمة بل في تبسيطها؛ نقل أداء الحماية العنقودية لملف تنفيذي واحد يسهل تدقيقه ونشره دون فرق تشغيل ضخمة.",
+        "مشروع مصنوع محلياً، يثبت قدرة الكفاءات الوطنية الشابة على هندسة وبناء أدوات دفاعية تلامس جذور أنظمة التشغيل.",
+      ],
+    },
+    refs: {
+      title: "المراجع والتواصل",
+      repo: "github.com/realozk/hakam",
+      url: "https://github.com/realozk/hakam",
+      lines: ["الترخيص: MIT (مفتوح المصدر)"],
+    },
   },
-  objective: {
-    title: "الهدف والحل المبتكر",
-    bullets: [
-      "«حَكَم» يقلب المعادلة: جدار حماية يعمل في أعمق نقطة بالنظام (Kernel) بتقنية eBPF، ليوفر أقصى درجات الحماية دون استنزاف موارد الخادم.",
-      "تقديم المنظومة بلغة Rust (صفر تعقيد تشغيلي)، يمكن نشره في دقائق على أي نظام Linux (5.15 فأحدث).",
-    ],
-  },
-  // The three kernel enforcement points — the heart of the poster.
-  layers: {
-    title: "المعمارية — ثلاث نقاط إنفاذ أمنية صارمة في النواة",
-    items: [
-      {
-        tag: "عند السلك · XDP",
-        text: "يُسقط برنامج XDP حركة المرور المعادية فور وصولها لكرت الشبكة وقبل تخصيص أي ذاكرة (sk_buff)، مما يوقف الاستنزاف المالي السحابي.",
-      },
-      {
-        tag: "عند محاوله الاتصال بالنظام · BPF-LSM",
-        text: "خطّاف socket_connect يرفض الاتصالات الخارجية المخالفة   — قنوات الاتصال العكسية (Reverse Shells) تُقتل قبل ولادة أي حزمة.",
-      },
-      {
-        tag: "عند العملية · Tracepoint",
-        text: "نقطة التتبّع sys_enter_connect تربط كل عملية حظر بالجهة التي أنشأتها (PID والاسم)، مما يمنح رؤية دقيقة للتهديدات الداخلية.",
-      },
-    ],
-    note: "يوجد محرك يطابق 202 توقيع لـ 13 عائلة هجومية ويتم رفضهم ويحدث قائمه الحظر فوريًا.",
-  },
-  // ── Results — real, kernel-measured numbers (already correct) ───────────
-  results: {
-    title: "النتائج ومؤشرات الأداء",
-    stats: [
-      { value: "48", unit: "ns", label: "زمن الاستجابة · p50" },
-      { value: "96", unit: "ns", label: "زمن الاستجابة · p99" },
-      { value: "41.5M", unit: "", label: "عملية إسقاط مختبرة" },
-      { value: "1", unit: "Binary", label: "ملف تشغيل شامل بـ Rust" },
-    ],
-    note: "الأرقام مقيسة مباشرة من خريطة LATENCY_HIST داخل النواة تحت ضغط حقيقي. يحقق حَكَم إنتاجية حزمٍ أعلى بكلفة معالجةٍ أقل مقارنة بالأنظمة غير المحمية.",
-    figureCaption: "واجهة Hakam الحيّة (HUD): لوحة التحكم التفاعلية والمخطط الشبكي أثناء التشغيل",
-  },
-  conclusion: {
-    title: "الخلاصة والأثر",
-    bullets: [
-      "الابتكار ليس في تعقيد الأنظمة بل في تبسيطها؛ نقل أداء الحماية العنقودية لملف تنفيذي واحد يسهل تدقيقه ونشره دون فرق تشغيل ضخمة.",
-      "مشروع مصنوع محلياً، يثبت قدرة الكفاءات الوطنية الشابة على هندسة وبناء أدوات دفاعية تلامس جذور أنظمة التشغيل.",
-    ],
-  },
-  refs: {
-    title: "المراجع والتواصل",
-    repo: "github.com/realozk/hakam",
-    url: "https://github.com/realozk/hakam",
-    lines: ["الترخيص: MIT (مفتوح المصدر)"],
+
+  en: {
+    // ── Chrome (buttons / hints — not part of the printed poster) ─────────
+    ui: {
+      print: "🖨 Print / Save PDF",
+      hint: "Edit the text in the CONTENT object at the top of Poster.tsx",
+      toggle: "العربية",
+      toggleTitle: "التبديل إلى النسخة العربية",
+    },
+
+    // ── Header ────────────────────────────────────────────────────────────
+    title: "Hakam",
+    titleAlt: "حَكَم",
+    subtitle: "An in-kernel cybersecurity firewall, enforced at the deepest layer of the system (eBPF)",
+    chips: ["XDP", "BPF-LSM", "eBPF", "Rust"],
+
+    // Left blank on purpose — the English poster shows no author/affiliation
+    // block. Empty strings render nothing (the JSX skips falsy values), so the
+    // header collapses cleanly instead of leaving a gap. Fill any of these in
+    // and it appears automatically.
+    author: "",
+    org: "",
+    event: "",
+
+    // ── Sections (edit freely; each is a titled card) ──────────────────────
+    intro: {
+      title: "Introduction & Problem",
+      bullets: [
+        "Organizations today burn enormous resources building complex infrastructure (clusters) to secure their systems under an “assume breach” model.",
+        "That protection comes at the cost of speed and operational smoothness: systems slow down because every single packet is parsed and inspected up in user space.",
+        "Standalone servers and edge devices cannot absorb the cost and complexity of these solutions, which leaves them either exposed to threats or running on weak security controls.",
+      ],
+    },
+    objective: {
+      title: "Objective & Innovative Solution",
+      bullets: [
+        "Hakam flips the equation: a firewall that runs at the deepest point in the system (the kernel) using eBPF, delivering maximum protection without draining the server’s resources.",
+        "Shipped as a single Rust binary (zero operational complexity) that deploys in minutes on any Linux system (5.15 or newer).",
+      ],
+    },
+    // The three kernel enforcement points — the heart of the poster.
+    layers: {
+      title: "Architecture — Three Strict Enforcement Points Inside the Kernel",
+      items: [
+        {
+          tag: "At the wire · XDP",
+          text: "The XDP program drops hostile traffic the instant it hits the network card, before a single byte of memory (sk_buff) is allocated — cutting off cloud bill drain at the source.",
+        },
+        {
+          tag: "At the connection attempt · BPF-LSM",
+          text: "The socket_connect hook denies outbound connections that violate policy — reverse shells are killed before a single packet is ever born.",
+        },
+        {
+          tag: "At the process · Tracepoint",
+          text: "The sys_enter_connect tracepoint ties every block back to the process that triggered it (PID and name), giving precise visibility into insider threats.",
+        },
+      ],
+      note: "A matching engine covers 202 signatures across 13 attack families; matches are denied and the blocklist is updated instantly.",
+    },
+    // ── Results — real, kernel-measured numbers (already correct) ───────────
+    results: {
+      title: "Results & Performance",
+      stats: [
+        { value: "48", unit: "ns", label: "Latency · p50" },
+        { value: "96", unit: "ns", label: "Latency · p99" },
+        { value: "41.5M", unit: "", label: "Drops under test" },
+        { value: "1", unit: "Binary", label: "Single self-contained Rust binary" },
+      ],
+      note: "Figures are measured straight from the LATENCY_HIST map inside the kernel under real load. Hakam sustains higher packet throughput at a lower processing cost than an unprotected system.",
+      figureCaption: "The live Hakam HUD: interactive control panel and network graph at runtime",
+    },
+    conclusion: {
+      title: "Conclusion & Impact",
+      bullets: [
+        "The innovation is not in making systems more complex, but simpler: cluster-grade protection performance collapsed into one executable that is easy to audit and deploy without a large operations team.",
+        "Built locally — proof that young national talent can engineer and ship defensive tooling that reaches the very roots of the operating system.",
+      ],
+    },
+    refs: {
+      title: "References & Contact",
+      repo: "github.com/realozk/hakam",
+      url: "https://github.com/realozk/hakam",
+      lines: ["License: MIT (open source)"],
+    },
   },
 };
+
+type Lang = keyof typeof CONTENT;
 
 const SectionHead = ({ n, title }: { n: string; title: string }) => (
   <div className="pstr-shead">
@@ -108,14 +210,32 @@ function setPrintPageSize() {
   el.textContent = `@page { size: 1040px ${h}px; margin: 0; }`;
 }
 
+// /poster?lang=en opens the English version directly; anything else is Arabic.
+function initialLang(): Lang {
+  if (typeof window === "undefined") return "ar";
+  return new URLSearchParams(window.location.search).get("lang") === "en" ? "en" : "ar";
+}
+
 export default function Poster() {
+  const [lang, setLang] = useState<Lang>(initialLang);
+  const C = CONTENT[lang];
+  const rtl = lang === "ar";
+
   useEffect(() => {
     window.addEventListener("beforeprint", setPrintPageSize);
     return () => window.removeEventListener("beforeprint", setPrintPageSize);
   }, []);
 
+  // Keep the URL shareable — /poster?lang=en points at what's on screen.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (lang === "ar") url.searchParams.delete("lang");
+    else url.searchParams.set("lang", lang);
+    window.history.replaceState(null, "", url);
+  }, [lang]);
+
   return (
-    <div className="pstr-root" dir="rtl">
+    <div className="pstr-root" dir={rtl ? "rtl" : "ltr"} lang={lang}>
       <div className="pstr-toolbar">
         <button
           className="pstr-btn"
@@ -124,9 +244,16 @@ export default function Poster() {
             window.print();
           }}
         >
-          🖨 طباعة / حفظ PDF
+          {C.ui.print}
         </button>
-        <span className="pstr-hint">عدّل النصوص في كائن C أعلى ملف Poster.tsx</span>
+        <button
+          className="pstr-btn pstr-btn-ghost"
+          title={C.ui.toggleTitle}
+          onClick={() => setLang(rtl ? "en" : "ar")}
+        >
+          {C.ui.toggle}
+        </button>
+        <span className="pstr-hint">{C.ui.hint}</span>
       </div>
 
       <article className="pstr-canvas">
@@ -135,8 +262,11 @@ export default function Poster() {
           <div className="pstr-titleblock">
             <div className="pstr-titlerow">
               <h1 className="pstr-title">{C.title}</h1>
-              <span className="pstr-titlelatin" dir="ltr">
-                {C.titleLatin}
+              <span
+                className={`pstr-titlealt ${rtl ? "pstr-titlealt-latin" : ""}`}
+                dir={rtl ? "ltr" : "rtl"}
+              >
+                {C.titleAlt}
               </span>
             </div>
             <p className="pstr-subtitle">{C.subtitle}</p>
@@ -150,9 +280,9 @@ export default function Poster() {
             </div>
           </div>
           <div className="pstr-meta">
-            <div className="pstr-author">{C.author}</div>
-            <div className="pstr-metaline">{C.org}</div>
-            <div className="pstr-metaline pstr-accent">{C.event}</div>
+            {C.author && <div className="pstr-author">{C.author}</div>}
+            {C.org && <div className="pstr-metaline">{C.org}</div>}
+            {C.event && <div className="pstr-metaline pstr-accent">{C.event}</div>}
           </div>
         </header>
 
@@ -250,7 +380,7 @@ export default function Poster() {
           >
             {C.refs.repo}
           </a>
-          <span>{C.event}</span>
+          {C.event && <span>{C.event}</span>}
         </footer>
       </article>
 
@@ -264,14 +394,19 @@ export default function Poster() {
         }
         .pstr-toolbar {
           width: 1040px; max-width: 94vw; display: flex; align-items: center;
-          gap: 16px; margin-bottom: 18px;
+          gap: 12px; margin-bottom: 18px;
         }
         .pstr-btn {
           background: #6fe7d4; color: #04060b; border: 0; cursor: pointer;
           font: 600 13px var(--font-sans, Inter, sans-serif);
           padding: 9px 16px; border-radius: 4px; letter-spacing: .02em;
         }
-        .pstr-hint { font-size: 12px; color: rgba(197,205,213,.4); }
+        .pstr-btn-ghost {
+          background: transparent; color: #6fe7d4;
+          border: 1px solid rgba(111,231,212,.45);
+        }
+        .pstr-btn-ghost:hover { background: rgba(111,231,212,.1); }
+        .pstr-hint { font-size: 12px; color: rgba(197,205,213,.4); margin-inline-start: 4px; }
 
         /* ── Canvas: A1 portrait ratio, roomy margins ── */
         .pstr-canvas {
@@ -299,9 +434,15 @@ export default function Poster() {
           font: 700 88px/.95 var(--font-disp, 'Clash Display', sans-serif);
           color: #f4f7fa; margin: 0; letter-spacing: -.01em;
         }
-        .pstr-titlelatin {
+        /* Secondary form of the name: the Latin transliteration next to the
+           Arabic title, and the Arabic script next to the English one. */
+        .pstr-titlealt {
+          font: 600 34px var(--font-disp, 'Clash Display', sans-serif);
+          color: #6fe7d4;
+        }
+        .pstr-titlealt-latin {
           font: 500 21px var(--font-mono, ui-monospace, monospace);
-          color: #6fe7d4; letter-spacing: .34em; text-transform: uppercase;
+          letter-spacing: .34em; text-transform: uppercase;
         }
         .pstr-subtitle {
           font-size: 19px; line-height: 1.75; color: #c9d2db; font-weight: 400;
@@ -314,7 +455,7 @@ export default function Poster() {
           letter-spacing: .16em;
         }
         .pstr-dot { width: 3px; height: 3px; border-radius: 50%; background: rgba(111,231,212,.45); }
-        .pstr-meta { text-align: left; min-width: 280px; padding-top: 10px; }
+        .pstr-meta { text-align: end; min-width: 280px; padding-top: 10px; }
         .pstr-author { font: 600 20px var(--font-sans, sans-serif); color: #f4f7fa; margin-bottom: 10px; }
         .pstr-metaline { font-size: 15px; line-height: 2; color: rgba(197,205,213,.66); }
         .pstr-accent { color: #d6e3ee; }
@@ -338,28 +479,36 @@ export default function Poster() {
           color: #f4f7fa; margin: 0; letter-spacing: -.005em; line-height: 1.25;
         }
 
-        /* ── Bullets — open, airy, no box ── */
+        /* ── Bullets — open, airy, no box. Logical properties throughout so
+           the whole sheet mirrors cleanly between Arabic (RTL) and English. ── */
         .pstr-ul { margin: 0; padding: 0; list-style: none; }
         .pstr-ul li {
           position: relative; font-size: 16px; line-height: 1.95;
-          color: #bac3cd; margin-bottom: 18px; padding-right: 24px;
+          color: #bac3cd; margin-bottom: 18px; padding-inline-start: 24px;
         }
         .pstr-ul li:last-child { margin-bottom: 0; }
         .pstr-ul li::before {
-          content: ""; position: absolute; right: 2px; top: 13px;
+          content: ""; position: absolute; inset-inline-start: 2px; top: 13px;
           width: 7px; height: 7px; border: 1.5px solid #6fe7d4; border-radius: 50%;
         }
+        /* Latin script sits tighter than Arabic at the same size. */
+        .pstr-root[dir="ltr"] .pstr-ul li { line-height: 1.75; }
+        .pstr-root[dir="ltr"] .pstr-layertext { line-height: 1.7; }
+        .pstr-root[dir="ltr"] .pstr-note { line-height: 1.75; }
+        .pstr-root[dir="ltr"] .pstr-subtitle { line-height: 1.6; }
 
         .pstr-note {
           font-size: 15.5px; line-height: 1.9; color: rgba(197,205,213,.66);
-          margin: 28px 0 0; padding-right: 16px; border-right: 2px solid rgba(111,231,212,.4);
+          margin: 28px 0 0; padding-inline-start: 16px;
+          border-inline-start: 2px solid rgba(111,231,212,.4);
         }
 
         /* ── Three enforcement layers — no boxes, top-rule marker ── */
         .pstr-layers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 44px; }
         .pstr-layer { position: relative; padding-top: 22px; }
         .pstr-layer::before {
-          content: ""; position: absolute; top: 0; right: 0; width: 46px; height: 2px; background: #6fe7d4;
+          content: ""; position: absolute; top: 0; inset-inline-start: 0;
+          width: 46px; height: 2px; background: #6fe7d4;
         }
         .pstr-lnum {
           display: block; font: 600 14px var(--font-mono, monospace);
@@ -376,7 +525,7 @@ export default function Poster() {
           font: 700 60px/1 var(--font-disp, 'Clash Display', sans-serif);
           color: #6fe7d4; letter-spacing: -.02em;
         }
-        .pstr-statunit { font-size: 22px; color: rgba(111,231,212,.65); margin-right: 5px; letter-spacing: 0; }
+        .pstr-statunit { font-size: 22px; color: rgba(111,231,212,.65); margin-inline-start: 5px; letter-spacing: 0; }
         .pstr-statlabel { font-size: 15px; color: rgba(197,205,213,.62); margin-top: 16px; line-height: 1.55; }
 
         .pstr-figure {
@@ -413,7 +562,8 @@ export default function Poster() {
 
         /* ── Print / export to PDF — page height is set dynamically (JS,
            setPrintPageSize) to the poster's real content height, so everything
-           fits on exactly one page with nothing clipped or spilling over. ── */
+           fits on exactly one page with nothing clipped or spilling over.
+           Whichever language is on screen is the one that prints. ── */
         @media print {
           html, body { margin: 0; padding: 0; }
           .pstr-root {

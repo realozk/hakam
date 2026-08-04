@@ -1,3 +1,23 @@
+//! Command-line arguments and the interactive operator console.
+//!
+//! Two distinct surfaces live here: [`Args`], parsed once at startup, and the
+//! REPL in [`run_stdin_loop`] that lets an operator inspect and change kernel
+//! state while the node runs.
+//!
+//! The console commands are thin by design — they read and write BPF maps
+//! directly, so a block takes effect on the very next packet with no reload and
+//! no restart. Two separate maps back two different kinds of block, and the
+//! distinction is the one worth understanding before using either:
+//!
+//!   * `block` writes `BLOCKLIST`, which the XDP and TC programs consult. It
+//!     drops packets to or from an address.
+//!   * `policy-block` writes `CONNECT_POLICY`, which the BPF-LSM hook consults.
+//!     It denies the `connect()` syscall itself, so a local process gets EPERM
+//!     rather than a silently black-holed connection.
+//!
+//! Map keys are LPM trie keys built by [`lpm_key`]; its doc comment covers the
+//! byte-order reasoning, which is the one genuinely subtle thing in this file.
+
 use std::{
     io::{self, BufRead, Write},
     net::Ipv4Addr,
@@ -379,7 +399,7 @@ fn cmd_unblock(ctx: &CliCtx, arg: Option<&str>) {
     }
 }
 
-// ── connect() egress policy (Arsenal roadmap Phase 2 #6) ────────────────────
+// ── connect() egress policy ─────────────────────────────────────────────────
 // These manage CONNECT_POLICY, which the BPF-LSM socket_connect hook consults.
 // A listed destination causes a local process's connect() to fail with EPERM —
 // the syscall is denied, distinct from the XDP/TC path which drops packets.
@@ -593,7 +613,7 @@ fn cmd_stats(ctx: &CliCtx) {
         let m = ctx.ring_overflow.blocking_lock();
         m.get(&0u32, 0).map(|v| v.iter().sum()).unwrap_or(0)
     };
-    // Live kernel conntrack table size — the Phase 2 #7 exit-criterion number.
+    // Live kernel conntrack table size.
     let active_flows: u64 = {
         let m = ctx.conntrack.blocking_lock();
         m.keys().filter(|k| k.is_ok()).count() as u64

@@ -1,9 +1,20 @@
-// DPI signature corpus for the Hakam HTTP-anchored payload inspector.
-//
-// Each `Sig` entry is a substring matched (case-insensitive) against the
-// uppercased payload AFTER an HTTP method prefix has been confirmed.
-// The kernel only samples the first PAYLOAD_LEN bytes of TCP segments, so
-// patterns are kept short and characteristic of well-known attack classes.
+//! DPI signature corpus and the matcher that runs it.
+//!
+//! Detection is deliberately narrow: a payload is inspected only after
+//! [`is_http_request`] confirms an HTTP method prefix. Non-HTTP traffic — DNS,
+//! SSH banners, opaque TLS, raw TCP — is skipped without the matcher running at
+//! all. This keeps the engine honest about what it actually covers.
+//!
+//! Every pattern in [`SIGNATURES`] is compiled once into a single
+//! ASCII-case-insensitive Aho-Corasick automaton, so a payload is scanned in one
+//! pass regardless of corpus size, and the raw packet bytes are matched directly
+//! with no per-packet case conversion. Patterns are written uppercase purely as
+//! a corpus style convention (a test enforces it); the matcher itself is
+//! case-blind.
+//!
+//! Patterns are kept short and characteristic, because the kernel only samples
+//! the first `PAYLOAD_LEN` bytes of each TCP segment — a signature longer than
+//! that window could never fire, which a test also enforces.
 
 #[derive(Copy, Clone)]
 pub struct Sig {

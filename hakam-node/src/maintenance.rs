@@ -1,3 +1,15 @@
+//! Background upkeep of the kernel `BLOCKLIST`.
+//!
+//! Nothing in the kernel expires a block on its own — the XDP program only ever
+//! adds entries, because removing them would mean walking the map on the packet
+//! path. Aging is therefore userspace's job, and [`ttl_sweep_task`] is what
+//! keeps an auto-block from being permanent: a rate-limited source that stops
+//! misbehaving is released once its entry passes [`BLOCK_TTL_SECS`].
+//!
+//! [`server_cmd_task`] exists for the demo scripts, which need to clear the
+//! blocklist between runs — otherwise sources blocked in one cycle stay dropped
+//! through the next and the following run looks like it did nothing.
+
 use std::{sync::Arc, time::Duration};
 
 use aya::maps::{lpm_trie::Key, LpmTrie, MapData};

@@ -7,12 +7,9 @@
 //!
 //! The `Reassembler` here closes that gap in userspace. Samples from the
 //! same 4-tuple get concatenated into a per-flow buffer; the matcher runs
-//! against the accumulated view. The state struct deliberately leaves room
-//! for fields a future eBPF conntrack (Arsenal roadmap Phase 2 #7) will
-//! populate — `seq_next` for retransmit dedupe and ordering, `dir` for
-//! client→server vs server→client classification.
+//! against the accumulated view.
 //!
-//! What this does with Phase 2 #7 conntrack data:
+//! What this does with the kernel's conntrack data:
 //!   * Sequence-ordered reassembly. Every sampled segment carries its TCP
 //!     sequence number (stamped by the kernel). We keep each flow's segments in
 //!     a map keyed by sequence and build the matched view in sequence order, so
@@ -32,9 +29,9 @@
 //!   * No TCP state machine. We do not track SYN/ACK/FIN — any TCP segment
 //!     with a payload is considered an opportunity to match.
 //!   * No sequence-wraparound handling. Segments are ordered by raw u32
-//!     sequence; a flow whose window straddles the 2^32 wrap (astronomically
-//!     unlikely within a ≤256-byte buffer) would order once-scrambled. Documented,
-//!     not handled — it never affects a real demo.
+//!     sequence; a flow whose window straddles the 2^32 wrap would order
+//!     once-scrambled. Documented rather than handled: it requires the wrap to
+//!     land inside a single flow's ≤256-byte buffer window.
 
 use std::collections::{BTreeMap, HashMap};
 

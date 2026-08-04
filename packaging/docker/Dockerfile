@@ -50,9 +50,14 @@ RUN printf '#!/bin/sh\nexec "$@"\n' > /usr/local/bin/sudo && chmod +x /usr/local
 COPY --from=builder /src/target/release/hakam-node /usr/local/bin/hakam-node
 COPY --from=builder /src/target/bpfel-unknown-none/release/hakam-ebpf /usr/local/lib/hakam/hakam-ebpf
 COPY packaging/docker/entrypoint.sh /usr/local/bin/hakam-entrypoint
-# Self-contained review harness — attack firehose, benign generator, and the
-# loopback target bootstrap. Driven by HAKAM_DEMO=1; see packaging/docker/REVIEW.md.
-COPY scripts/setup-demo.sh scripts/seclist-attack.sh scripts/benign-traffic.sh scripts/target-listener.py /opt/hakam/scripts/
+# Self-contained review harness. Everything a reviewer runs lives in one
+# directory, because demo-cycle.sh and attack-on-demand.sh resolve their helpers
+# relative to their own location ($SCRIPT_DIR) — split them across paths and they
+# won't find seclist-attack.sh or target-listener.py. Driven by HAKAM_DEMO=1;
+# see packaging/docker/REVIEW.md.
+COPY scripts/setup-demo.sh scripts/seclist-attack.sh scripts/benign-traffic.sh \
+     scripts/demo-cycle.sh scripts/attack-on-demand.sh scripts/target-listener.py \
+     /opt/hakam/scripts/
 RUN chmod +x /usr/local/bin/hakam-entrypoint /opt/hakam/scripts/*.sh /opt/hakam/scripts/*.py
 
 ENV HAKAM_IFACE=eth0 \

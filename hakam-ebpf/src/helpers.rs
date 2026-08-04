@@ -1,3 +1,7 @@
+//! Small shared primitives for the kernel programs: drop accounting, latency
+//! histogram writes, and the bounds-checked packet-pointer cast every parser
+//! goes through.
+
 use aya_ebpf::programs::XdpContext;
 
 use crate::{DROP_COUNTER, LATENCY_HIST};

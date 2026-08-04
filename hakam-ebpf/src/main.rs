@@ -1,3 +1,20 @@
+//! Kernel-side entry point: map declarations and program stubs.
+//!
+//! Everything the kernel side owns is declared here — the BPF maps that form
+//! the interface to userspace, and the four attachment points, each of which
+//! forwards straight into its own module:
+//!
+//! | Program            | Module              | Role                             |
+//! |--------------------|---------------------|----------------------------------|
+//! | `hakam_ebpf`       | [`xdp`]             | Ingress filter and payload sampler |
+//! | `hakam_egress`     | [`tc`]              | Outbound drop on destination match |
+//! | `hakam_connect`    | [`tracepoint`]      | Process attribution for connects   |
+//! | `hakam_connect_lsm`| [`lsm`]             | Denies `connect()` before it forms |
+//!
+//! The maps below are the *only* channel between kernel and userspace: there is
+//! no other IPC. Userspace opens them by the exact names used here, so renaming
+//! a map is a breaking change on both sides.
+
 #![no_std]
 #![no_main]
 
@@ -42,19 +59,19 @@ pub const TP_OFF_USERVADDR: usize = 24;
 #[map]
 pub static BLOCKLIST: LpmTrie<u32, u64> = LpmTrie::<u32, u64>::with_max_entries(1024, 0);
 
-// Outbound connect() policy (Arsenal roadmap Phase 2 #6). Same key convention as
-// BLOCKLIST: a destination IP a local process is forbidden to connect() to. The
-// LSM socket_connect hook consults this and returns -EPERM on a hit, killing the
-// syscall before any packet is created. Userspace-managed via `policy-block`.
+// Outbound connect() policy. Same key convention as BLOCKLIST: a destination IP
+// a local process is forbidden to connect() to. The LSM socket_connect hook
+// consults this and returns -EPERM on a hit, killing the syscall before any
+// packet is created. Userspace-managed via the `policy-block` command.
 #[map]
 pub static CONNECT_POLICY: LpmTrie<u32, u64> = LpmTrie::<u32, u64>::with_max_entries(1024, 0);
 
-// Tight-scope eBPF conntrack (Arsenal roadmap Phase 2 #7). Per-flow state keyed
-// on the 4-tuple, holding seq_next/last_ts/packets/dir. No TCP state machine —
-// any TCP segment with a payload updates the flow. LruHashMap so the kernel
-// auto-evicts the least-recently-used flow under capacity pressure (the answer
-// to "1M flows = 1M entries, what's the eviction policy"). XDP populates it;
-// userspace reads flow_count for `stats`.
+// Per-flow conntrack state keyed on the 4-tuple, holding
+// seq_next/last_ts/packets/dir. No TCP state machine — any TCP segment with a
+// payload updates the flow. LruHashMap so the kernel auto-evicts the
+// least-recently-used flow under capacity pressure, bounding memory no matter
+// how many flows the host sees. XDP populates it; userspace reads the entry
+// count for `stats`.
 #[map]
 pub static CONNTRACK: LruHashMap<FlowKey, FlowState> =
     LruHashMap::<FlowKey, FlowState>::with_max_entries(65_536, 0);

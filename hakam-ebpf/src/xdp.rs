@@ -1,3 +1,25 @@
+//! XDP ingress: the earliest enforcement point in the stack.
+//!
+//! This runs at the driver's receive path, before the kernel allocates an
+//! `sk_buff` for the packet. A verdict here costs a fraction of what the same
+//! decision costs anywhere further up — that is the whole reason the hot path
+//! lives in XDP rather than in userspace.
+//!
+//! Every packet takes the same fixed sequence, cheapest check first:
+//!
+//!   1. Non-IPv4 → `XDP_PASS` immediately.
+//!   2. Source IP in `BLOCKLIST` → `XDP_DROP`.
+//!   3. Per-second rate accounting; over `RATE_LIMIT` the source is added to
+//!      `BLOCKLIST` and dropped, so subsequent packets exit at step 2.
+//!   4. TCP only: record the flow in conntrack and sample the payload for
+//!      userspace DPI. Sampling never changes the verdict.
+//!
+//! Two constraints shape the code below. The verifier requires every packet
+//! access to be provably in bounds, which is what `ptr_at` and the explicit
+//! `data_end` comparisons in `sample_payload` are for. And nothing here may
+//! fail the packet: a parse error returns `XDP_ABORTED` rather than dropping
+//! traffic on a bug, and a full ring buffer increments a counter and moves on.
+
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_ktime_get_ns,

@@ -59,7 +59,9 @@ String matching runs in **userspace** — the BPF verifier forbids loops and str
 | p50 | **48 ns** |
 | p99 | **96 ns** |
 
-`LATENCY_HIST` is a log2-bucketed histogram, so these are bucket midpoints: the median drop lands in the 32–64 ns bucket, the 99th percentile in the 64–128 ns bucket. Read live from the running node with the `stats` command. The drop lands at the driver hook — no `sk_buff` is ever allocated for a blocked packet.
+`LATENCY_HIST` is a log2-bucketed histogram, so these are bucket midpoints: the median drop lands in the 32–64 ns bucket, the 99th percentile in the 64–128 ns bucket. The drop lands at the driver hook — no `sk_buff` is ever allocated for a blocked packet.
+
+**Where these two numbers come from:** the `stats` command on a running node, which reads the `LATENCY_HIST` map directly — that is the authoritative source, and the way to reproduce them. The bench harness *also* tries to sample latency over the WebSocket feed, but that capture path is broken: it connects and receives zero metrics frames, so the `.ws.csv` files in `bench/results/` are header-only. That's harness plumbing, not a datapath defect — see [Known issues](bench/README.md#known-issues--future-work). **The CPU and pps figures below are captured independently, from `/proc`, and are unaffected.**
 
 **CPU under load** — three 60-second workloads, medians of 3 runs each. Measured on a `veth` pair in **native-mode (driver) XDP** inside a VM, so absolute packet rates are bound by the VM's software path — **read the baseline↔Hakam delta, not the absolute pps.** Methodology and raw CSVs: [`bench/`](bench/README.md).
 
@@ -94,20 +96,56 @@ Raw CSVs: [`bench/results/`](bench/results/) · Reproduce: [`bench/README.md`](b
 
 ## Quick start
 
+Two paths. **Docker** is the fastest way to see it work — one Linux host, no
+toolchain, no UI. **From source** adds the browser HUD.
+
+### Docker — no build toolchain, no UI
+
+Needs a real Linux kernel (≥ 5.8) and root; eBPF loads into the *host* kernel, so
+Docker Desktop on macOS/Windows will not work — use a VM or cloud instance.
+
 ```bash
+git clone https://github.com/realozk/hakam.git && cd hakam
+docker build -f packaging/docker/Dockerfile -t hakam:latest .   # ~10 min
+
+# Terminal 1 — arm Hakam + stand up a self-contained loopback target
+sudo HAKAM_DEMO=1 ./packaging/docker/run.sh
+
+# Terminal 2 — narrated 7-phase attack cycle (~4 min per loop)
+docker exec -it hakam /opt/hakam/scripts/demo-cycle.sh
+```
+
+Terminal 1 is the live Hakam CLI — `stats`, `list`, `status`, `help`. Watch
+`▼ INTERCEPT` lines land there as the cycle fires. `docker stop hakam` detaches
+every kernel hook cleanly.
+
+The build runs inside a container, so no Rust toolchain, LLVM, or `bpf-linker`
+lands on your host. Full reviewer walkthrough, including how to get a Linux box
+if you're on a Mac or Windows: [`packaging/docker/REVIEW.md`](packaging/docker/REVIEW.md)
+
+### From source — with the browser HUD
+
+This is the development path, and the only one that gives you the HUD. Linux
+≥ 5.15 on the VM side, Node ≥ 18 on whatever runs the browser.
+
+```bash
+# ── VM (Linux) — one-time toolchain setup ──────────────────────────────────
+rustup toolchain install nightly --component rust-src
+cargo install bpf-linker         # needs LLVM ≥ 14; this is the slow step
+
 # ── VM (Linux) ─────────────────────────────────────────────────────────────
 git clone https://github.com/realozk/hakam.git && cd hakam
 
 # One-time: boot the demo network
 ./scripts/setup-demo.sh          # creates dummy0, adds 31 IP aliases
 
-# Build eBPF + launch hakam-node (requires nightly + bpf-linker)
+# Build eBPF + launch hakam-node.
 # XDP attaches to `lo` because local-to-local traffic between dummy0 IP aliases
 # routes via loopback in the Linux kernel — that's where the packets actually flow.
 cargo xtask run --iface lo --mode skb --bind 0.0.0.0   # 0.0.0.0 so a HUD on another host can reach the WS
 
 # ── Mac (separate terminal) ────────────────────────────────────────────────
-cd hakam-ui && npm install
+cd hakam-ui && npm install                             # needs Node ≥ 18
 VITE_HAKAM_WS_URL=ws://<vm-ip>:8080/ws npm run dev     # point the HUD at the VM — see start_guide.md
 # Open http://localhost:5173 in a browser
 
@@ -144,22 +182,8 @@ xtask/          build automation (cargo xtask run / build-ebpf)
 scripts/        demo, bench, preflight, evasion test
 docs/           architecture, runtime_flow, codebase, evasion, scripts reference
 bench/          benchmark rig and raw CSV results
-```
-
----
-
-## Build requirements
-
-**VM (Linux ≥ 5.15):**
-```bash
-rustup toolchain install nightly --component rust-src
-cargo install bpf-linker          # needs LLVM ≥ 14
-```
-
-**Mac:**
-```bash
-node --version   # ≥ 18
-# Rust stable for Tauri — installed automatically via hakam-ui/src-tauri
+corpus/         replayable attack pcaps (SQLi, XSS, traversal, cmd injection)
+packaging/      Docker image, systemd unit, install script
 ```
 
 ---

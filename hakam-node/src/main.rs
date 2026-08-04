@@ -1,8 +1,20 @@
-// hakam-node — userspace controller for the Hakam eBPF firewall.
-// Loads hakam-ebpf into the kernel, attaches XDP + TC + tracepoint hooks,
-// then runs concurrent telemetry, DPI, connect-event, TTL-sweep, and demo-cmd
-// tasks. The CLI stdin loop runs on a blocking thread so it never stalls the
-// async runtime.
+//! `hakam-node` — userspace controller for the Hakam eBPF firewall.
+//!
+//! Startup is a fixed sequence: load the compiled eBPF object, attach the four
+//! kernel programs, take ownership of the BPF maps, then spawn the async tasks
+//! that service them. Everything after that is event-driven.
+//!
+//! Attachment is deliberately tiered by how much the kernel has to support.
+//! XDP is required — without it there is no datapath and startup fails. The
+//! tracepoint and BPF-LSM hooks are optional: on a kernel lacking either, the
+//! node logs the downgrade and runs on with reduced capability rather than
+//! refusing to start. This is why `attach_lsm` returns `Ok(())` on failure —
+//! losing `connect()` enforcement should cost you enforcement, not the firewall.
+//!
+//! The interactive CLI only runs when stdin is a terminal. Headless — under
+//! systemd, in a container, with piped stdin — the line reader would hit EOF
+//! immediately and take the process down with it, so it is skipped entirely and
+//! the node is driven over the WebSocket feed and signals instead.
 
 #[cfg(feature = "linux")]
 mod cli;
@@ -105,9 +117,9 @@ async fn main() -> Result<()> {
     .context("Failed to interpret 'CONNECT_POLICY' as LpmTrie<u32, u64>")?;
     let connect_policy = Arc::new(Mutex::new(connect_policy));
 
-    // CONNTRACK (Phase 2 #7). Typed as raw byte arrays (FlowKey is 12 B,
-    // FlowState 24 B) so we don't need to impl aya::Pod on the shared types —
-    // we only ever count its entries for the `active_flows` stat.
+    // Typed as raw byte arrays (FlowKey is 12 B, FlowState 24 B) so we don't
+    // need to impl aya::Pod on the shared types — we only ever count entries
+    // here, for the `active_flows` stat.
     let conntrack: AyaHashMap<_, [u8; 12], [u8; 24]> = AyaHashMap::try_from(
         bpf.take_map("CONNTRACK")
             .context("Map 'CONNTRACK' not found — rebuild eBPF with cargo xtask build-ebpf")?,
@@ -244,12 +256,9 @@ async fn main() -> Result<()> {
         bpf_path: Arc::new(bpf_path),
     };
 
-    // With a controlling terminal, run the interactive CLI on a blocking thread.
-    // Headless (container, systemd, piped stdin) there is no TTY: the line reader
-    // would hit EOF immediately and exit, so we skip it entirely and just wait for
-    // a shutdown signal — the datapath, telemetry, and WS server keep running and
-    // the node is driven over the WebSocket feed and signals. No parked blocking
-    // thread, so SIGINT detaches and exits cleanly.
+    // On a TTY the console runs on a blocking thread so its reads never stall
+    // the async runtime; headless we wait on the shutdown signal instead, with
+    // no parked thread to keep SIGINT from exiting cleanly.
     if io::stdin().is_terminal() {
         let stdin_task = task::spawn_blocking(move || cli::run_stdin_loop(ctx));
         tokio::select! {
@@ -374,9 +383,8 @@ fn attach_tracepoint(bpf: &mut Ebpf) -> Result<()> {
     Ok(())
 }
 
-// BPF-LSM socket_connect enforcement (Arsenal roadmap Phase 2 #6). Degrades to
-// observe-only (tracepoint stays active) if the kernel lacks BPF-LSM, so the
-// demo never hard-fails on a reviewer's box — it just loses enforcement.
+// BPF-LSM socket_connect enforcement. Degrades to observe-only (the tracepoint
+// stays active) on a kernel without BPF-LSM, rather than failing startup.
 #[cfg(feature = "linux")]
 fn attach_lsm(bpf: &mut Ebpf) -> Result<()> {
     let lsm_unavailable = |reason: &str| {

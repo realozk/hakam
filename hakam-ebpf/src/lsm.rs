@@ -1,16 +1,15 @@
-//! BPF-LSM `socket_connect` enforcement (Arsenal roadmap Phase 2 #6).
+//! BPF-LSM `socket_connect` enforcement: the precise outbound policy point.
 //!
-//! This hook runs *inside* the connect(2) syscall, last in the LSM chain
-//! (after the major MAC modules — SELinux/AppArmor — so any of them returning
-//! -EPERM first short-circuits before we are consulted) and before the
-//! protocol's own connect. If the
-//! destination IP is in CONNECT_POLICY we return -EPERM, which aborts the
-//! syscall: the connection never forms and no packet is ever created. That is
-//! the distinction from the TC egress drop (which kills the packet on the wire
-//! *after* the syscall succeeds) — here the originating process gets an
-//! immediate "Operation not permitted".
+//! This hook runs *inside* the connect(2) syscall, last in the LSM chain (after
+//! the major MAC modules — SELinux/AppArmor — so any of them returning -EPERM
+//! first short-circuits before we are consulted) and before the protocol's own
+//! connect. If the destination IP is in `CONNECT_POLICY` we return -EPERM,
+//! which aborts the syscall: the connection never forms and no packet is ever
+//! created. That is the distinction from the TC egress drop, which kills the
+//! packet on the wire *after* the syscall succeeds — here the originating
+//! process gets an immediate "Operation not permitted" instead of a black hole.
 //!
-//! Scope (honest limitations, see docs):
+//! Scope, stated plainly:
 //!   * connect()-based flows only. Connectionless UDP (sendto without connect)
 //!     never triggers this hook — TC egress is the catch-all for those.
 //!   * IPv4 only. AF_INET6 connects are passed through untouched.

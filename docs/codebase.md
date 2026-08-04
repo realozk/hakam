@@ -11,22 +11,27 @@
 ## 0 · Top-level layout
 
 ```
-defthon/
+hakam/
 ├── Cargo.toml              ← workspace manifest (Rust)
 ├── Cargo.lock
 ├── rust-toolchain.toml     ← pins the toolchain (nightly for eBPF crate)
 ├── .cargo/config.toml      ← target/linker config for the eBPF target
-├── README.md               ← (still pre-rewrite — Phase 8 of the plan)
+├── .github/workflows/      ← CI: userspace build+test, eBPF build
+├── README.md               ← project overview, performance, limitations
 ├── start_guide.md          ← 3-terminal demo runbook
-├── blackhat_readiness_plan.md  ← the 8-phase plan we're working through
-├── repomix-output.txt      ← legacy export, ignore
+├── CONTRIBUTING.md · SECURITY.md · LICENSE
 │
-├── hakam-common/         ← Rust crate — shared types (kernel + userspace)
-├── hakam-ebpf/           ← Rust crate — kernel eBPF programs
-├── hakam-node/           ← Rust crate — userspace controller
-├── hakam-ui/             ← React/Vite HUD (+ Tauri shell, optional)
+├── hakam-common/           ← Rust crate — shared types (kernel + userspace)
+├── hakam-ebpf/             ← Rust crate — kernel eBPF programs
+├── hakam-node/             ← Rust crate — userspace controller
+├── hakam-ui/               ← React/Vite HUD (+ Tauri shell, optional)
 ├── xtask/                  ← Rust crate — build automation (cargo xtask …)
+│
 ├── scripts/                ← bash demo + ops scripts
+├── bench/                  ← benchmark rig and raw CSV results
+├── corpus/                 ← replayable attack pcaps
+├── packaging/              ← Docker image, systemd unit, install script
+├── demo/                   ← screencast fallback (recording SOP)
 └── docs/                   ← this folder (architecture, codebase, runtime_flow)
 ```
 

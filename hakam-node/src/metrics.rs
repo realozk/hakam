@@ -1,3 +1,21 @@
+//! Metrics sampling: kernel counters and host stats, once per second.
+//!
+//! [`ticker`] is the only writer of the metrics feed the HUD renders. Two kinds
+//! of value flow through it, and they are read very differently:
+//!
+//!   * **Kernel maps** are per-CPU, so a reading is the sum across all CPUs.
+//!     They are monotonic counters — the consumer, not this module, is
+//!     responsible for differencing them.
+//!   * **Host stats** come from `/proc`, where the raw values are cumulative
+//!     since boot. Reporting those directly would show a near-static average, so
+//!     CPU and interface throughput are diffed against the previous tick.
+//!
+//! Latency is the one non-obvious reading. The kernel records drop latencies
+//! into a 64-bucket log2 histogram rather than storing samples, which makes the
+//! kernel-side write a single increment. The cost is resolution: percentiles are
+//! recovered from bucket midpoints, so a reported figure is accurate to within
+//! its power-of-two bucket, not exact.
+
 use std::{sync::Arc, time::Duration};
 
 use aya::maps::{HashMap as AyaHashMap, MapData, PerCpuArray};
@@ -102,9 +120,8 @@ pub async fn ticker(
             map.get(&0u32, 0).map(|v| v.iter().sum()).unwrap_or(0)
         };
 
-        // Live count of the kernel conntrack table — the Phase 2 #7 exit number.
-        // Iterating the keys is approximate under concurrent kernel writes, which
-        // is fine for a gauge.
+        // Live count of the kernel conntrack table. Iterating the keys is
+        // approximate under concurrent kernel writes, which is fine for a gauge.
         let active_flows: u64 = {
             let map = conntrack.lock().await;
             map.keys().filter(|k| k.is_ok()).count() as u64
