@@ -1,5 +1,7 @@
 # Hakam
 
+![Hakam banner](banner.gif)
+
 [![CI](https://github.com/realozk/hakam/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/realozk/hakam/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
