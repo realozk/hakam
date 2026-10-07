@@ -23,8 +23,9 @@ use tokio::sync::Mutex;
 
 use crate::telemetry::{metrics_json, Sender};
 
-/// Nanoseconds since boot using CLOCK_BOOTTIME — same reference as
-/// bpf_ktime_get_ns() in the eBPF programs.
+/// Nanoseconds since boot using CLOCK_BOOTTIME, including time spent suspended.
+/// The eBPF programs use bpf_ktime_get_ns() (CLOCK_MONOTONIC), which excludes
+/// suspend time; comparing the two clocks can overstate an entry's age.
 pub fn boot_time_ns() -> u64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };

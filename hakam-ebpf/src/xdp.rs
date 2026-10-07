@@ -71,7 +71,7 @@ fn try_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(xdp_action::XDP_DROP);
     }
 
-    // bpf_ktime_get_ns() returns nanoseconds since boot (same clock as CLOCK_BOOTTIME).
+    // CLOCK_MONOTONIC nanoseconds since boot, excluding time spent suspended.
     let now_ns: u64 = unsafe { bpf_ktime_get_ns() };
     let now_sec: u32 = (now_ns / 1_000_000_000) as u32;
 

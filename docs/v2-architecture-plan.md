@@ -4,7 +4,10 @@
 > I used AI to expand and organize the explanation.
 > Proposals remain subject to implementation and testing.
 
-> **Status:** Design proposal; not yet implemented.
+> **Status:** Working draft; development is underway on most of the main ideas.
+> These ideas define the intended direction, while details and implementation
+> order remain subject to change. Planned capabilities are not available in the
+> current build unless explicitly documented as implemented and validated.
 >
 > **Scope review:** 2026-10-02. The required proof of concept is narrowed to
 > connection-based behavior on one Linux server, one application honeytoken,

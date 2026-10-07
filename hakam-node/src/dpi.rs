@@ -18,8 +18,8 @@
 //!
 //! That join is a heuristic, and worth knowing before trusting its output: if
 //! two processes reach the same destination and port within the TTL window, the
-//! most recent one wins. Attribution is reported when it is available and simply
-//! omitted when it is not, never guessed.
+//! most recent one wins. Attribution is reported when a recent mapping is
+//! available and omitted otherwise; the reported process may be misattributed.
 
 use std::{collections::HashMap, net::Ipv4Addr, sync::Arc};
 

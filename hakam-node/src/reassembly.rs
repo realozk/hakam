@@ -19,9 +19,9 @@
 //!     the flag can't tell a late-arriving earlier segment from a true
 //!     retransmit (both sit behind the expected sequence), but the sequence
 //!     number can.
-//!   * Retransmit dedupe. A segment whose sequence we already hold is a
-//!     duplicate and is dropped (sampled payloads are a fixed width, so an
-//!     identical sequence means identical bytes).
+//!   * Sequence dedupe. A sample whose sequence we already hold is discarded.
+//!     The first sample is retained without comparing payload bytes, so
+//!     conflicting retransmissions are not detected or resolved.
 //!   * Gap awareness. The kernel's `FLOW_GAP` flag feeds an out-of-order
 //!     counter for stats; byte placement is sequence-driven regardless.
 //!
@@ -152,9 +152,9 @@ impl Reassembler {
             });
         }
 
-        // Duplicate: we already hold a fragment at this sequence. Sampled
-        // payloads are a fixed width, so an identical sequence means identical
-        // bytes — drop it. (Counters are bumped here, before the &mut borrow.)
+        // Retain the first fragment at this sequence without comparing bytes.
+        // Later fragments may contain conflicting payloads. Counters are bumped
+        // here, before the &mut borrow.
         if self.flows.get(&key).is_some_and(|s| s.frags.contains_key(&seq)) {
             self.dropped_retransmit += 1;
             return self.flows.get(&key).map(|s| s.view.as_slice());

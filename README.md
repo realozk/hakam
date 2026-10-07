@@ -177,9 +177,16 @@ before use beyond an isolated test environment.
 - [Codebase reference](docs/codebase.md)
 - [Signature evasion analysis](docs/evasion.md)
 - [Script reference](docs/scripts.md)
-- [Proposed v2 architecture](docs/v2-architecture-plan.md) — design proposal; planned capabilities are not current features
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
+
+## Roadmap
+
+The [v2 architecture plan](docs/v2-architecture-plan.md) is a working draft.
+Its main ideas are the intended direction for Hakam, and work on most of them
+is underway. Details, scope, and implementation order may change as development
+and testing progress. The plan describes ongoing and proposed work; it does not
+represent the capabilities available in the current build.
 
 ## License
 
