@@ -42,16 +42,7 @@ pub const TC_ACT_OK: i32 = 0;
 pub const TC_ACT_SHOT: i32 = 2;
 pub const AF_INET: u16 = 2;
 
-// Layout of syscalls/sys_enter_connect tracepoint args on x86-64 Linux ≥ 5.4:
-//   offset  0 : u16  common_type
-//   offset  2 : u8   common_flags
-//   offset  3 : u8   common_preempt_count
-//   offset  4 : i32  common_pid
-//   offset  8 : i32  __syscall_nr
-//   offset 12 : u32  <padding>
-//   offset 16 : u64  fd
-//   offset 24 : u64  uservaddr  ← pointer to sockaddr in user memory
-//   offset 32 : i64  addrlen
+// Layout of syscalls/sys_enter_connect tracepoint args on x86-64 Linux ≥ 5.4
 pub const TP_OFF_USERVADDR: usize = 24;
 
 // Key  : (prefix_len, addr) where addr bytes match host-endian u32 of the IP octets.

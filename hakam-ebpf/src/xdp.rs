@@ -20,6 +20,10 @@
 //! fail the packet: a parse error returns `XDP_ABORTED` rather than dropping
 //! traffic on a bug, and a full ring buffer increments a counter and moves on.
 
+
+
+//https://github.com/xdp-project/xdp-tools. / for better xdp hook sampling  and droping
+
 use aya_ebpf::{
     bindings::xdp_action,
     helpers::bpf_ktime_get_ns,
