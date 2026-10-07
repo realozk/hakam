@@ -1,5 +1,9 @@
 # Hakam v2 — Architecture and Implementation Plan
 
+> Draft design notes. The direction and technical decisions are mine;
+> I used AI to expand and organize the explanation.
+> Proposals remain subject to implementation and testing.
+
 > **Status:** Design proposal; not yet implemented.
 >
 > **Scope review:** 2026-10-02. The required proof of concept is narrowed to
