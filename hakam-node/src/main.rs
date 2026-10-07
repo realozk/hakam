@@ -342,7 +342,7 @@ fn attach_tc(bpf: &mut Ebpf, iface: &str) -> Result<()> {
         "◉".bright_red().bold(),
         "TC".bright_red().bold(),
         "armed on".bright_black(),
-        format!("[{}] — outbound exfiltration killed at the NIC", iface).bright_black(),
+        format!("[{}] — IPv4 destination filtering active", iface).bright_black(),
     );
     Ok(())
 }

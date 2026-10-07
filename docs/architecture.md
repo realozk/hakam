@@ -1,161 +1,121 @@
-# Hakam — Architecture
+# Architecture
 
-> **One-page reference.** Where every claim in the README and on stage is grounded.
-> Read time: ~90 seconds.
+Hakam has four kernel hooks and a userspace controller. The hooks enforce
+IPv4 packet and connection policies. The controller consumes sampled traffic,
+updates maps, and publishes telemetry. Operators use the interactive CLI,
+service logs, or a WebSocket client.
 
----
+## Kernel and userspace boundary
 
-## 1 · The honest one-liner
+```text
+KERNEL: hakam-ebpf (no_std)
+  XDP ingress ── BLOCKLIST / per-CPU rate counters ── drop or pass
+       └── TCP samples and sequence metadata ── PAYLOAD_EVENTS
+  TC egress ──── BLOCKLIST destination lookup ────── drop or pass
+  BPF-LSM ────── CONNECT_POLICY destination lookup ─ allow or EPERM
+  Connect tracepoint ── PID / process / destination ─ CONNECT_EVENTS
 
-> *Hakam is a kernel-resident packet filter (XDP + TC + tracepoint) that samples the first 64 B of every TCP segment into a userspace ring buffer, where a 202-signature Aho-Corasick matcher runs over a per-flow reassembly buffer. On a hit, userspace pushes the source IP into a kernel LPM trie, after which all further traffic from that IP drops at the driver edge.*
-
-The string match itself is **userspace**. Nothing else makes sense under the eBPF verifier — no string library, no unbounded loops, no regex engine. What's *kernel-resident* is the **drop**, the **rate limit**, the **CIDR blocklist lookup**, and the **payload sample feed**. That's the right answer to *"where does the regex run."*
-
----
-
-## 2 · Kernel / userspace boundary
-
-```
-                ┌──────────────────────────────────────────────────────────────┐
-                │  KERNEL  (hakam-ebpf,  no_std,  ≤310 LOC)                   │
-                │                                                              │
-   ingress  →   │   XDP hook  ──┬──► BLOCKLIST (LpmTrie<u32,u64>) ──► DROP      │
-   (NIC)        │               │                                              │
-                │               ├──► RATE LIMIT (HashMap, 500 pps/IP/window)    │
-                │               │       overflow → BLOCKLIST + DROP             │
-                │               │                                              │
-                │               └──► sample first 64 B of TCP payload ──┐      │
-                │                                                       ▼      │
-                │   PAYLOAD_EVENTS RingBuf  (1 MiB)  ───────────────────┐      │
-                │                                                       │      │
-   egress   →   │   TC classifier ─► BLOCKLIST lookup ─► TC_ACT_SHOT    │      │
-                │                                                       │      │
-   syscalls →   │   tracepoint sys_enter_connect ─► CONNECT_EVENTS RB   │      │
-                │                                                       │      │
-                │   maps: DROP_COUNTER, LATENCY_HIST (per-CPU log2 buckets)    │
-                └─────────────────────────────────┬─────────────────────┘      │
-                                                  │ ring buffers                │
-                                                  ▼                             │
-                ┌──────────────────────────────────────────────────────────────┐
-                │  USERSPACE  (hakam-node, tokio, ~1.3k LOC)                  │
-                │                                                              │
-                │   payload_task : pull RB → reassembler.ingest(4-tuple) →    │
-                │                  HTTP method gate → Aho-Corasick scan →      │
-                │                  fallback URL-decoded scan; on hit:          │
-                │                    1. insert src_addr into BLOCKLIST (LPM)   │
-                │                    2. reassembler.forget(flow)               │
-                │                    3. broadcast BLOCK json on telemetry      │
-                │                    4. update DpiStats counters               │
-                │                                                              │
-                │   metrics_ticker (1 s) : drop_counter sum, p50/p99 from      │
-                │                          LATENCY_HIST, /proc/{stat,net/dev,  │
-                │                          self/status} → broadcast METRICS    │
-                │                                                              │
-                │   connect_task : drain CONNECT_EVENTS → broadcast CONNECT    │
-                │                                                              │
-                │   ttl_sweep_task (30 s) : evict BLOCKLIST entries older      │
-                │                           than BLOCK_TTL_SECS (120 s)        │
-                │                                                              │
-                │   ws_server   : warp on ${--bind}:${--ws-port}/ws fan-out   │
-                │                 via tokio::broadcast (cap 512) to N HUDs;    │
-                │                 default 127.0.0.1:8080 (demo uses 0.0.0.0)   │
-                │                                                              │
-                │   stdin CLI   : block / unblock / list / status / rules /    │
-                │                 stats / clear / help / quit                  │
-                └──────────────────────────────────────────────────────────────┘
+USERSPACE: hakam-node
+  PAYLOAD_EVENTS → sample reassembly → HTTP gate → signature matcher
+       └── match → insert source in BLOCKLIST → detection telemetry
+  CONNECT_EVENTS → connection telemetry / heuristic process correlation
+  Kernel maps → counters / histogram estimates → periodic metrics
+  CLI → map reads and policy changes
+  Maintenance → periodic packet-block expiry
+  WebSocket → telemetry fan-out and demo commands
 ```
 
----
+## Hook responsibilities
 
-## 3 · What each hook does (5-line table)
+| Hook | Program | Scope and action |
+|---|---|---|
+| XDP ingress | `hakam_ebpf` | IPv4 source lookup in `BLOCKLIST`; per-CPU source rate policy; eligible TCP payload sampling. |
+| TC egress | `hakam_egress` | IPv4 destination lookup in `BLOCKLIST` on the attached interface. |
+| BPF-LSM `socket_connect` | `hakam_connect_lsm` | Denies new IPv4 `connect()` calls whose destination matches `CONNECT_POLICY`. Requires kernel support. |
+| `sys_enter_connect` | `hakam_connect` | Observes local IPv4 connection attempts. Optional CIDR filtering through `MONITOR_CFG`. |
 
-| Hook | Program type | Decides | Forwards | Notes |
-|------|--------------|---------|----------|-------|
-| **XDP ingress** | `xdp` | `XDP_DROP` if src in BLOCKLIST or rate ≥ 500 pps; else `XDP_PASS` | First 64 B of TCP payload + full 4-tuple (src/dst addr, src/dst port) via `PAYLOAD_EVENTS` ring | Latency timed only on DROP path |
-| **TC egress** | `classifier` | `TC_ACT_SHOT` if dst in BLOCKLIST; else `TC_ACT_OK` | — | Stops outbound exfil to a known-bad CIDR |
-| **Tracepoint** | `tracepoint sys_enter_connect` | always returns 0 (observe-only); skips events outside `MONITOR_CFG` CIDR before reserving a ring slot | PID + `comm` + dst sockaddr via `CONNECT_EVENTS` | Surfaces *which process* is talking out — IPv4 only |
+The tracepoint is an observation hook, not an enforcement point. Connectionless
+UDP sends do not invoke `socket_connect`; TC applies packet policy on its
+attached interface. LSM connection policy is destination-based and is not
+restricted to the interface selected for XDP/TC.
 
----
+The default local demo uses `lo` in generic (`skb`) mode. Native driver-mode XDP
+can reject blocked traffic before socket-buffer allocation on a supported
+interface; that claim does not apply to the generic-mode demo.
 
-## 4 · Data flow on attack
+## Signature detection
 
-1. Packet arrives → XDP. Not in BLOCKLIST, not rate-limited → `XDP_PASS`. First 64 B of TCP payload + full 4-tuple (`src_addr`, `dst_addr`, `src_port`, `dst_port`) pushed to `PAYLOAD_EVENTS`.
-2. `payload_task` pulls from the ring, constructs a `FlowKey`, and calls `Reassembler::ingest`. The per-flow buffer (default 256 B cap, 30 s TTL) accumulates segments from the same 4-tuple **in TCP sequence order** (Phase 2 #7) — out-of-order delivery is reordered and retransmits are deduped, using the `seq` the kernel stamps on each event. Separately, XDP records every TCP segment into the kernel `CONNTRACK` flow table (`seq_next`/`last_ts`/`packets`/`dir`), whose live size is surfaced as `active_flows`.
-3. Match runs on the **reassembled view**, not just this segment. First, the HTTP method gate (`GET ` / `POST ` / `PUT ` / `HEAD ` / `DELETE ` / `OPTIONS ` / `PATCH ` / `CONNECT ` / `TRACE `). Then the Aho-Corasick automaton over all 202 signatures (case-insensitive on raw bytes). If that misses, a single-pass URL-decoded view (`%XX` → byte, `+` → space) is scanned as a fallback — so `UNION%20SELECT` and `UNION+SELECT` both hit.
-4. On hit: userspace inserts `(src_addr, /32, boot_time_ns)` into the kernel `BLOCKLIST` LpmTrie via aya, calls `Reassembler::forget(flow)` so the same connection can be re-inspected (HTTP keep-alive), broadcasts `BLOCK` JSON to every WS subscriber, and increments `DpiStats`.
-5. Every subsequent packet from that IP hits the BLOCKLIST branch in XDP and is dropped *before* IP routing.
-6. After 120 s, `ttl_sweep_task` removes the entry and broadcasts `UNBLOCK`.
+1. XDP samples the first 64 available payload bytes of eligible TCP segments and records flow/sequence metadata.
+2. `payload_task` builds a view keyed by the IPv4 address/port four-tuple. Defaults are 256 sampled bytes per flow, 4,096 flows, and a 30-second idle-age threshold.
+3. The HTTP gate checks for a recognized request method. Aho-Corasick scans the view with ASCII case folding, then scans a single URL-decoded view if necessary.
+4. A match attempts to install a `/32` source entry in `BLOCKLIST`, releases that flow's sample buffer, and publishes a detection event.
+5. Later ingress packets from the source and egress packets to it hit the kernel blocklist.
 
-**On the packet path, detection is reactive, not preventive** — the first attacking *flow* always passes through to the host (one segment for a single-shot attack; up to a few segments while the reassembler waits for enough bytes). The follow-up flood is what gets stopped at the driver edge. This is intentional (keeps the kernel program verifier-safe) but it's the honest answer when someone asks "did the first SQLi reach the app."
+Detection is asynchronous. The sampled request can reach the application before
+the source is blocked. Sample reassembly sorts fragments by raw sequence number
+and discards repeated sequence keys; it does not restore missing bytes or provide
+full TCP stream validation. Its idle cleanup runs every 1,024 payload events.
 
-**On the `connect()` syscall path, the BPF-LSM `socket_connect` hook (Phase 2 #6) is preventive** — a destination in `CONNECT_POLICY` makes the originating `connect(2)` return `-EPERM`, so the connection never forms and no packet is ever created. Honest scope: this covers `connect()`-based IPv4 flows only. Connectionless UDP (`sendto` without `connect`) and the packet path above stay reactive — TC egress is the catch-all there. The policy is destination-keyed (deny anyone from reaching a listed dst), not task-keyed; per-process *attribution* on a block is a separate mechanism (#8).
+## Process attribution
 
----
+The tracepoint reports PID and process name for local connection attempts.
+`dpi.rs` correlates detections using destination address and port, retaining the
+most recent observed process within the attribution window. This is a heuristic:
+multiple processes contacting the same endpoint can be confused, and remote
+inbound traffic has no guaranteed local originating-process attribution.
 
-## 5 · Telemetry shapes
+## Map inventory
 
-All JSON, line-delimited over WS at `:8080/ws`, broadcast to all subscribers via `tokio::broadcast<String>` (cap 512, lagging clients drop messages):
+Declarations are in [main.rs](../hakam-ebpf/src/main.rs).
 
-| `type`     | Fields |
-|------------|--------|
-| `METRICS`  | `cpu`, `latency_p50_ns`, `latency_p99_ns`, `dropped`, `rx_bps`, `tx_bps`, `mem_kb` |
-| `BLOCK`    | `source`, `target`, `payload?`, `action`, `category?`, `severity?` |
-| `UNBLOCK`  | `source` |
-| `CONNECT`  | `pid`, `comm`, `dst`, `port` |
-| `EVENT`    | `message`, `level` |
+| Map | Type / capacity | Purpose |
+|---|---|---|
+| `BLOCKLIST` | LPM trie / 1,024 entries | IPv4 packet blocks with insertion timestamps |
+| `CONNECT_POLICY` | LPM trie / 1,024 entries | Separate outbound connection policy |
+| `CONNTRACK` | LRU hash / 65,536 entries | Lightweight flow and sequence observations |
+| `PACKET_COUNTER` | LRU per-CPU hash / 1,024 keys | Source packet counts |
+| `LAST_SEEN` | LRU per-CPU hash / 1,024 keys | Source rate-window timestamps |
+| `PAYLOAD_EVENTS` | Ring buffer / 1 MiB | TCP payload samples |
+| `CONNECT_EVENTS` | Ring buffer / 512 KiB | Process connection events |
+| `DROP_COUNTER` | Per-CPU array / 1 cell | XDP drop counts |
+| `LATENCY_HIST` | Per-CPU array / 64 cells | Log2 blocklist-drop latency histogram |
+| `RING_OVERFLOW` | Per-CPU array / 1 cell | Failed payload-ring reservations |
+| `MONITOR_CFG` | Array / 1 cell | Optional connect-observation CIDR |
 
-The HUD (`hakam-ui`) subscribes and renders. It does not push anything back — strictly read-only.
+The rate threshold is 500 packets per second per source per CPU; it is not a
+host-wide 500-packet/s bound. Blocklist capacity and ring-buffer loss can limit
+coverage under load.
 
----
+Packet-block expiry runs in userspace every 30 seconds with a 120-second age
+threshold. It is not a kernel deadline, and insertion/expiry use different clock
+sources in the current implementation. Connection-policy entries are managed
+separately through `policy-block`, `policy-unblock`, and `policy-list`.
 
-## 6 · Maps inventory
+## Telemetry
 
-| Map | Type | Capacity | Purpose |
-|-----|------|---------:|---------|
-| `BLOCKLIST` | `LpmTrie<u32,u64>` | 1024 | Drop decision, supports CIDR. Value = boot-time ns of insert (TTL). |
-| `PACKET_COUNTER` | `LruPerCpuHashMap<u32,u64>` | 1024 | Per-IP packet count in current 1-second window; LRU eviction prevents new-attacker starvation past 1024 unique sources. |
-| `LAST_SEEN` | `LruPerCpuHashMap<u32,u32>` | 1024 | Per-IP last window-second; rolls counter on change. |
-| `PAYLOAD_EVENTS` | `RingBuf` | 1 MiB | TCP payload samples + 4-tuple → DPI. |
-| `CONNECT_EVENTS` | `RingBuf` | 512 KiB | Outbound `connect()` events. |
-| `CONNTRACK` | `LruHashMap<FlowKey,FlowState>` | 65536 | Phase 2 #7 flow table — `seq_next`/`last_ts`/`packets`/`dir` per 4-tuple. LRU eviction; count surfaced as `active_flows`. |
-| `CONNECT_POLICY` | `LpmTrie<u32,u64>` | 1024 | Phase 2 #6 — destinations denied at the `socket_connect` LSM hook. |
-| `DROP_COUNTER` | `PerCpuArray<u64>` | 1 | Total drops, summed in userspace. |
-| `LATENCY_HIST` | `PerCpuArray<u64>` | 64 | log2-bucketed XDP_DROP latency. |
-| `RING_OVERFLOW` | `PerCpuArray<u64>` | 1 | Counter of samples we couldn't enqueue (ring full) — surfaced in CLI `stats`. |
-| `MONITOR_CFG` | `Array<u64>` | 1 | Optional CIDR scope for the connect tracepoint. High 32 = network, low 32 = mask. Cell = 0 → monitor all. |
+The default endpoint is `ws://127.0.0.1:8080/ws`. The node uses a bounded Tokio
+broadcast channel. Slow consumers can miss events; telemetry is not a persistent
+audit log.
 
-`BLOCKLIST` capacity is **1024 entries** — a real concern at scale, not at demo scale. Worth calling out if asked.
+| Message | Main fields |
+|---|---|
+| `METRICS` | CPU, histogram p50/p99 estimates, drops, interface rates, memory, ring overflows, active flows |
+| `BLOCK` | Source, target, action, optional payload/category/severity and process correlation |
+| `UNBLOCK` | Source |
+| `CONNECT` | PID, process name, destination, port |
+| `EVENT` | Message and level |
 
----
+The WebSocket also accepts demo-control input and forwards it to a local command
+file. Keep the endpoint on loopback or a trusted network. The CLI reads kernel
+counters and policy maps; WebSocket clients can consume events independently.
 
-## 7 · Honest limits
+## Validation and design status
 
-The full evasion table (30 mutations, hit/miss verified by `cargo test --test dpi_matcher`) lives in [`evasion.md`](evasion.md). Headline gaps:
+Userspace tests cover shared layouts, signatures, decoding, reassembly, and
+helper behavior. Kernel acceptance requires an eBPF build, verifier/load check,
+and live traffic exercise on the selected Linux configuration. See
+[CONTRIBUTING.md](../CONTRIBUTING.md) and the [script reference](scripts.md).
 
-- **No regex.** Aho-Corasick substring matching with ASCII case-folding plus a single-pass URL-decode fallback. **Recursive decoding (e.g. `%2520`) is not unwound**, by design — it amplifies false-positive surface on legitimate URLs.
-- **First packet always passes.** Detection is reactive (see §4). Slow-and-low scanners that send one payload per source IP from a wide pool are a worst case.
-- **64-byte sample window per segment.** Reassembly stitches segments from the same 4-tuple into a 256-byte buffer **in TCP sequence order** (Phase 2 #7), so the split-segment evasion is closed for both in-order *and* out-of-order delivery, and retransmits are deduped. The residual gap is the sample window itself: a single oversized segment still truncates at 64 B, and a payload split across a segment Hakam never sampled (sub-64-byte segments aren't sampled) leaves a hole.
-- **Per-CPU rate limit.** The `RATE_LIMIT = 500 pps` is per-CPU per-IP because of the way HashMap lookups work in eBPF, so the worst-case effective limit is `500 × num_cpus`. Fine at demo scale, not a hard guarantee on bigger boxes.
-- **IPv4 only.** No IPv6 path in any of the three programs.
-- **`dummy0` SKB-mode** in the demo. Native-mode XDP on a real NIC has not been benchmarked yet — that's Arsenal Phase 3 (driver-mode + perf rewrite).
-- **Blocklist capped at 1024 entries.** A determined attacker with >1024 source IPs would saturate the trie before the 120 s TTL drains it.
-
----
-
-## 8 · Test coverage
-
-**72 passing tests across 5 targets** (cross-platform — no Linux required):
-
-| Target | Count | Pins |
-|--------|------:|------|
-| `hakam-common` lib | 12 | `Ipv4Addr` byte order, std interop, `PayloadEvent` layout (24 + `PAYLOAD_LEN` bytes), `ConnectEvent` layout. |
-| `hakam-node` lib · `signatures` | 4 | Uppercase / non-empty / ≤ `PAYLOAD_LEN` / `CATEGORIES`-in-sync invariants. |
-| `hakam-node` lib · `reassembly` | 10 | Concatenation, flow isolation, `forget`, GC eviction, buffer cap, flow cap, retransmit dedupe, out-of-order reassembly. |
-| `hakam-node` lib · `monitor` | 5 | CIDR packing for `MONITOR_CFG` across /0, /16, /24, /32 and the monitor-all sentinel. |
-| `hakam-node` `tests/dpi_matcher.rs` | 25 | One test per row of [`evasion.md`](evasion.md) + smoke + HTTP-gate coverage. |
-| `hakam-node` `tests/reassembly.rs` | 5 | End-to-end split-segment attacks (in-order + reordered); benign + attacker flow isolation; keep-alive `forget`. |
-| `hakam-node` `tests/unit_tests.rs` | 11 | Byte order, mock blocklist, command tokenisation, IP parsing, capacity. |
-
-What's still missing:
-- `hakam-ebpf` — **no tests.** No verifier-safe test harness wired up. Validation is `cargo xtask build-ebpf` + manual smoke under `cargo xtask run`.
-- **No live integration test** loads the eBPF program, fires a packet, and asserts XDP_DROP. Manual smoke via `scripts/smoke.sh` and `scripts/demo-cycle.sh`.
+The [v2 architecture plan](v2-architecture-plan.md) describes proposed work.
+Behavioral detection, honeytokens, and workload-scoped containment from that
+plan are not implemented capabilities of the current version.

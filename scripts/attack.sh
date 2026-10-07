@@ -157,7 +157,7 @@ read -r || true
 if check_tool nc; then
     echo -e "${CYN}  Attempting outbound nc connect to ${C2_IP}:${C2_PORT}…${RST}"
     nc -w 2 "$C2_IP" "$C2_PORT" </dev/null || true
-    echo -e "${GRN}  ✓ Connection attempt made. If TC egress is working, it was killed.${RST}"
+    echo -e "${GRN}  ✓ Connection attempt made. Inspect TC attachment and drop behavior.${RST}"
     echo -e "${GRN}  ✓ Check the hakam-node terminal — tracepoint shows the PID and comm.${RST}"
 fi
 

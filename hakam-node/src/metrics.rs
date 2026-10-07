@@ -1,6 +1,6 @@
 //! Metrics sampling: kernel counters and host stats, once per second.
 //!
-//! [`ticker`] is the only writer of the metrics feed the HUD renders. Two kinds
+//! [`ticker`] is the only writer of the metrics feed consumed by telemetry clients. Two kinds
 //! of value flow through it, and they are read very differently:
 //!
 //!   * **Kernel maps** are per-CPU, so a reading is the sum across all CPUs.

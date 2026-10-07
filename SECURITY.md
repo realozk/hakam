@@ -1,56 +1,40 @@
-# Security Policy
+# Security policy
 
-## Scope and intent
+Hakam is a research and demonstration firewall. Its current coverage and limits
+are described in the [README](README.md#limitations) and
+[evasion analysis](docs/evasion.md). Signature matching and the demo traffic set
+do not establish a security guarantee or production readiness.
 
-Hakam is an **open-source, single-host eBPF firewall** built for research,
-learning, and demonstration. It is deliberately auditable and documents its own
-limits honestly — see [Honest limitations](README.md#honest-limitations) and the
-[evasion corpus](docs/evasion.md). It is **not** a hardened, production WAF, and
-its signature DPI is a supporting layer, not a security guarantee. Please keep
-that framing in mind when assessing impact.
+## Maintained code
 
-## Supported versions
+Security fixes are made against `main`. Older revisions may not receive
+backported fixes; include the affected commit or tag in your report.
 
-| Version            | Supported |
-|--------------------|:---------:|
-| latest release / `main` | ✅ |
-| older tags         | ❌ (please upgrade) |
+## Report a vulnerability
 
-## Reporting a vulnerability
+Use the repository's **Security → Report a vulnerability** option if private
+vulnerability reporting is enabled. Do not include exploit details or sensitive
+data in a public issue. If that option is unavailable, ask the maintainer to
+provide a private reporting channel without publishing the vulnerability.
 
-**Please do not open a public issue for a security vulnerability.**
+Include:
 
-Report it privately through GitHub's private vulnerability reporting:
+- The affected component and commit or version.
+- Kernel version and configuration, interface, and attachment mode.
+- Reproduction steps and observed impact.
+- Relevant logs or a minimal proof of concept, with credentials removed.
 
-1. Go to the **Security** tab of the repository.
-2. Click **Report a vulnerability** and describe the issue.
+Reports are reviewed as maintainer availability permits. This project does not
+promise a fixed response deadline or a vulnerability bounty.
 
-Please include:
+## Evaluation scope
 
-- affected component (kernel program, userspace node, UI, or a script),
-- kernel version (`uname -r`) and how Hakam was attached (interface + mode),
-- steps to reproduce, and the impact you observed,
-- a proof of concept if you have one.
+Use an isolated Linux host or VM for demonstrations. The container has privileged
+access to the host kernel, and the setup scripts change network configuration.
+The telemetry WebSocket has demo-control functionality; keep it on loopback or
+a trusted network. Report issues involving unintended blocking, policy bypass,
+unsafe kernel access, privilege boundaries, or unauthenticated control access.
 
-I'll acknowledge your report as soon as I reasonably can and keep you updated on
-a fix. Because Hakam is maintained by a single person, please allow reasonable
-time before any public disclosure — coordinated disclosure is appreciated.
-
-## What is in scope
-
-- Memory-safety or logic bugs in the userspace node (`hakam-node`) that a remote
-  or local input can trigger.
-- eBPF programs that can be made to misbehave, crash, or bypass enforcement in a
-  way not already documented as a limitation.
-- The demo/packaging scripts running with more privilege than they need.
-
-## What is out of scope
-
-- The documented detection limits (64-byte capture window, sampled-segment
-  reassembly, ASCII case folding, single-pass URL decoding) — these are known
-  and listed in the README on purpose.
-- Findings that require an already-privileged local attacker, since Hakam itself
-  runs privileged by design (it loads kernel programs).
-- Denial of service from unrealistic traffic volumes against the demo network.
-
-Thank you for helping keep Hakam honest and safe to run.
+Documented signature misses remain useful context for reports. New bypasses,
+incorrect enforcement, and availability failures should include the traffic and
+configuration needed to reproduce them.

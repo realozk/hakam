@@ -1,62 +1,68 @@
-# Deploying Hakam (core)
+# Running Hakam as a service or container
 
-Two ways to run the **core** firewall on a Linux box. Neither needs the UI — the
-node logs everything of value to the console / journal (armed hooks, `INTERCEPT`
-lines, blocks). The UI is an optional dashboard you can attach later.
+These workflows run the Linux firewall controller and compiled eBPF object.
+Use the interactive CLI for foreground operation and the journal for systemd.
 
-> **Requirements (both paths):** Linux ≥ 5.7, root, and — for `connect()`
-> *enforcement* — BPF-LSM enabled (`grep -w bpf /sys/kernel/security/lsm`).
-> Without BPF-LSM the LSM hook degrades to observe-only; XDP/TC/DPI/conntrack all
-> still run. Build needs Rust nightly + `bpf-linker`.
+Use a Linux host or VM with kernel 5.15 or newer as the development baseline,
+root access, and eBPF support. BPF-LSM connection enforcement additionally needs
+`CONFIG_BPF_LSM=y` and `bpf` in `/sys/kernel/security/lsm`. If that hook cannot
+attach, startup reports the failure and the remaining hooks can continue.
 
-## Option A — systemd (bare metal / VM)  ✅ validated
+## systemd
+
+From the repository root, with the source-build dependencies installed:
 
 ```bash
-./packaging/install.sh                       # build + install binary, eBPF object, unit
-sudo nano /etc/hakam/hakam.env               # set HAKAM_IFACE (see: ip -br link)
+./packaging/install.sh
+sudo nano /etc/hakam/hakam.env
 sudo systemctl enable --now hakam
-journalctl -u hakam -f                        # watch it
-sudo systemctl stop hakam                      # clean detach (SIGINT)
+journalctl -u hakam -f
 ```
 
-Config lives in `/etc/hakam/hakam.env` (interface, XDP mode, bind address). The
-service runs headless and detaches every hook on stop.
+Set `HAKAM_IFACE` to the interface you intend to filter; use `ip -br link` to
+inspect available interfaces. The environment file also configures XDP mode and
+telemetry bind address. Review the service's logs to confirm actual hook status.
 
-## Option B — container  ✅ validated
-
-> **Reviewing, not deploying?** See [`docker/REVIEW.md`](docker/REVIEW.md) — a
-> prebuilt-image path (no source build) with a one-flag self-contained demo:
-> `sudo HAKAM_DEMO=1 ./run.sh`, then fire attacks from a second terminal. Build
-> the shippable tarball with [`docker/save-image.sh`](docker/save-image.sh).
+Stop with:
 
 ```bash
-docker build -f packaging/docker/Dockerfile -t hakam:latest .   # from repo root
-HAKAM_IFACE=eth0 ./packaging/docker/run.sh                       # production: real NIC
+sudo systemctl stop hakam
 ```
 
-The container build compiles the eBPF object from source, so it pulls a Rust
-toolchain and `bpf-linker` (the slow step — ~10–15 min). The run is
-`--privileged --network host` because eBPF attaches to the **host** kernel and
-interfaces; the telemetry WebSocket is then on `ws://<host>:8080/ws`.
-`docker stop` sends SIGINT, so hooks detach cleanly.
+The service uses SIGINT for shutdown. Inspect the service unit and environment
+file in [systemd/](systemd/) before changing deployment settings.
 
-Validated end-to-end (Docker 29, kernel 6.x): `docker run` arms XDP + TC +
-BPF-LSM headless and serves telemetry; a SQLi fired at a target was dropped by
-the container's datapath (`BLOCK … XDP_DROP`); `docker stop` exited 0 with all
-hooks detached.
+## Docker
 
-## Optional — the UI (not required)
-
-`hakam-ui` is a separate dashboard that just subscribes to the telemetry
-WebSocket. To use it, run the core (either option above), then point the UI at
-`ws://<host>:8080/ws`. See `hakam-ui/README.md`. Skip it entirely and you still
-get the full picture from `journalctl -u hakam -f` or the interactive CLI.
-
-## Verifying it's up
+From the repository root:
 
 ```bash
-# the kernel programs are loaded:
-sudo bpftool prog show | grep -E 'xdp|lsm|classifier'   # if bpftool installed
-# telemetry is live:
-websocat ws://localhost:8080/ws | head -1               # one METRICS line
+docker build -f packaging/docker/Dockerfile -t hakam:latest .
+sudo HAKAM_IFACE=eth0 ./packaging/docker/run.sh
 ```
+
+Replace `eth0` with your selected interface. The image compiles Rust and eBPF
+inside the container build. Runtime uses `--privileged --network host` to attach
+to the host kernel and interfaces. Stop with `docker stop hakam`.
+
+For an isolated local traffic demo, use
+[the Docker walkthrough](docker/REVIEW.md). [save-image.sh](docker/save-image.sh)
+exports a built image for transfer; no downloadable prebuilt image is included.
+
+## Telemetry
+
+The source node defaults to `ws://127.0.0.1:8080/ws`. The Docker runner binds
+to `0.0.0.0` by default; set `HAKAM_BIND=127.0.0.1` for local access. Use
+`websocat` to inspect events. Remote access can use an SSH-forwarded port. The
+WebSocket accepts demo commands as well as serving telemetry; keep access
+limited to a trusted network.
+
+To inspect loaded programs and telemetry, with the optional tools installed:
+
+```bash
+sudo bpftool prog show
+websocat ws://127.0.0.1:8080/ws
+```
+
+Check startup logs for failures and test traffic on the selected interface.
+A running process or open WebSocket alone does not confirm every hook is active.

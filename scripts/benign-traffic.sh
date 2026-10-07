@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # benign-traffic.sh — fires legitimate HTTP requests to demonstrate Hakam's
-# zero false-positive rate during the demo.
+# benign request behavior during the demo.
 #
 # Uses a dedicated source pool (10.99.3.x) that never overlaps with the attack
 # pool (10.99.1.x / 10.99.2.x), so a blocked attacker never silences real users.
@@ -29,7 +29,7 @@ GRN=$'\033[0;32m'; CYN=$'\033[0;36m'; DIM=$'\033[2m'; BLD=$'\033[1m'; RST=$'\033
 
 usage() {
     cat <<EOF
-hakam benign-traffic — legitimate HTTP traffic to prove zero false positives
+hakam benign-traffic — legitimate HTTP traffic for a bounded benign sample
 
   -n N         requests to send (default ${COUNT})
   -c           continuous mode (Ctrl-C to stop)

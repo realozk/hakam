@@ -1,4 +1,4 @@
-//! WebSocket telemetry feed — the wire protocol between node and HUD.
+//! WebSocket telemetry feed — the event protocol for command-line clients and tools.
 //!
 //! Every task that has something to report sends a JSON string into one
 //! broadcast channel, and [`run_ws_server`] fans it out to all connected
@@ -9,9 +9,9 @@
 //! Messages are built by the `*_json` constructors below rather than a
 //! serialisation framework, which keeps the node free of a serde dependency but
 //! puts the burden of correct escaping on [`json_escape`] — anything
-//! interpolated into a message must go through it. The HUD parses these fields
+//! interpolated into a message must go through it. Clients parse these fields
 //! by name, so the constructors are a real interface: renaming a field breaks
-//! the frontend, and the tests at the bottom of this file pin the wire format
+//! consumers, and the tests at the bottom of this file pin the wire format
 //! for exactly that reason.
 
 use std::sync::Arc;
@@ -227,8 +227,8 @@ async fn handle_ws_client(ws: warp::ws::WebSocket, tx: Arc<Sender>) {
     //   {"type":"DEMO_CMD","action":"<char>"}  → written to the demo cmd file.
     //   {"type":"EVASION", ...}                → a local reporter
     //     (attack-on-demand.sh) telling us a crafted evasion payload reached the
-    //     target undetected; relay it verbatim to every HUD client so the miss
-    //     is shown honestly. Anything else is ignored.
+    //     target undetected; relay it verbatim to every telemetry client. The
+    //     reporter assertion is not independently verified here. Anything else is ignored.
     let inbound = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_rx.next().await {
             if let Ok(text) = msg.to_str() {
@@ -263,7 +263,7 @@ async fn handle_ws_client(ws: warp::ws::WebSocket, tx: Arc<Sender>) {
 mod tests {
     use super::block_json;
 
-    // The HUD parses `pid` / `comm` straight off the BLOCK message — pin the
+    // Clients parse `pid` / `comm` straight off the BLOCK message — pin the
     // exact wire format so a refactor can't silently break attribution display.
     #[test]
     fn block_json_includes_attribution_when_present() {
@@ -282,7 +282,7 @@ mod tests {
     }
 
     // A manual block (no originating connect observed) must omit both fields,
-    // not emit null/0 — the HUD keys its origin line on `pid` being truthy.
+    // not emit null/0 — clients can distinguish absent attribution from a real PID.
     #[test]
     fn block_json_omits_attribution_when_absent() {
         let s = block_json(

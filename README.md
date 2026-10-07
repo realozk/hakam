@@ -1,201 +1,184 @@
 # Hakam
 
+[![CI](https://github.com/realozk/hakam/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/realozk/hakam/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **A layered eBPF host firewall in a single Rust binary.** Three kernel enforcement points on one host — packets dropped at the XDP driver hook, outbound connections denied at the `socket_connect` syscall, and every block attributed to the process that opened it.
+**A Linux host firewall built with Rust and eBPF.**
 
-Hakam is a single-host, single-binary firewall built on eBPF — small enough to read end to end. Getting both packet-level *and* process-level enforcement usually means adopting cluster infrastructure (an orchestrator, agents, a control plane). Hakam takes the opposite trade: three kernel enforcement points on one box.
+Hakam combines inbound packet filtering, outbound connection policy, and process
+connection telemetry on a single host. Kernel programs enforce the rules; a Rust
+controller inspects sampled HTTP traffic, manages blocklists, and exposes an
+interactive CLI and WebSocket telemetry.
 
-- **The wire** — an XDP program drops blocklisted sources at the driver hook, before an `sk_buff` is ever allocated, with a per-IP rate limiter behind it.
-- **The syscall** — a BPF-LSM hook on `socket_connect` returns `EPERM` on policy-violating outbound connections, so a reverse shell or exfil channel dies at `connect()` before a single packet exists.
-- **The process** — a `sys_enter_connect` tracepoint plus a lightweight eBPF conntrack correlate a block back to the originating PID and process name — so you see *who* opened the flow, not just which IP.
+This repository is a research and demonstration project. It includes the kernel
+programs, controller, reproducible terminal demos, packet captures, and
+benchmark results. Start with the [setup guide](start_guide.md) to try it, or the
+[architecture reference](docs/architecture.md) to understand the implementation.
 
-A userspace engine closes the loop: it reassembles the TCP segments the kernel samples and matches them against 202 signatures across 13 attack families (Aho-Corasick); on a hit it pushes the attacker's IP straight into the kernel blocklist map. A browser HUD shows drops, latency, and flow state in real time. Signature DPI is a supporting layer, not the headline — see [Honest limitations](#honest-limitations).
+## What it does
 
-![Hakam HUD](https://github.com/realozk/hakam/raw/main/banner.gif)
+| Component | Purpose |
+|---|---|
+| XDP ingress | Drops IPv4 packets from blocked sources and applies a per-source, per-CPU rate limit. |
+| TC egress | Drops IPv4 packets to destinations in the packet blocklist on the attached interface. |
+| BPF-LSM | Denies new IPv4 `connect()` calls to destinations in a separate connection policy, when the kernel supports BPF-LSM. |
+| Connect tracepoint | Reports local connection attempts with PID, process name, destination, and port. |
+| Signature inspection | Matches sampled HTTP request bytes against 202 patterns across 13 attack families. |
 
-
----
+The controller runs as `hakam-node` and loads a separate compiled eBPF object.
+Use the interactive CLI for manual operation, or systemd logs for a service.
+A richer terminal interface is planned; the current version uses a line-based CLI.
 
 ## How it works
 
-```
-── kernel · hakam-ebpf (no_std) ───────────────────────────────────
+```text
+Inbound IPv4 packet
+  → XDP: blocklist lookup and rate limit
+  → sample eligible TCP payloads → userspace HTTP signature matcher
+  → attempt to add matching source to BLOCKLIST
+  → subsequent ingress packets dropped by XDP
 
-  OUTBOUND  connect() ─►  [BPF-LSM socket_connect]
-                            • CONNECT_POLICY (LPM trie) hit → -EPERM
-                            • connection never forms — no packet exists
-                          [sys_enter_connect tracepoint]
-                            • (pid, comm, dst) → process attribution
+Outbound IPv4 packet
+  → TC egress: destination lookup in BLOCKLIST
 
-  INBOUND   NIC / veth ─►  [XDP hook]
-                            • BLOCKLIST (LPM trie) → XDP_DROP  ← no sk_buff
-                            • per-IP rate limit (500 pps) → auto-block
-                            • sample first 64 B of TCP → PAYLOAD_EVENTS ring
-                                  │ XDP_PASS
-                            kernel network stack
-                                  │
-                          [TC egress]  ← kills reverse shells / exfil OUT
-                                  │
-── userspace · hakam-node (tokio) ┼────────────────────────────────
-                                  ▼
-   • reads PAYLOAD_EVENTS ring buffer
-   • reassembles TCP segments in sequence order
-   • 202-signature Aho-Corasick DPI  →  match → push IP into BLOCKLIST
-   • correlates each block → originating PID (attribution)
-   • CLI (block / policy-block / stats)  +  WebSocket → browser HUD
+Local IPv4 connect()
+  → BPF-LSM: destination lookup in CONNECT_POLICY → allow or EPERM
+  → connect tracepoint: process connection telemetry
+
+Kernel maps and events → hakam-node → interactive CLI / service logs / WebSocket
 ```
 
-String matching runs in **userspace** — the BPF verifier forbids loops and string libraries in kernel programs. But every **enforcement** decision stays in the kernel: the XDP drop, the LSM `EPERM`, the TC egress kill. Once a source is blocked, its traffic never touches the TCP stack again.
-
----
-
-## Performance
-
-**Drop latency — read straight from the kernel.** The per-CPU `LATENCY_HIST` map times every XDP drop; these numbers are accumulated over **41.5 million** drops under sustained flood, not a self-reported average. Latency is a property of the drop path itself — a single LPM-trie lookup at the driver hook — so it holds regardless of the host it's measured on:
-
-| Percentile | XDP drop latency |
-|---|:---:|
-| p50 | **48 ns** |
-| p99 | **96 ns** |
-
-`LATENCY_HIST` is a log2-bucketed histogram, so these are bucket midpoints: the median drop lands in the 32–64 ns bucket, the 99th percentile in the 64–128 ns bucket. The drop lands at the driver hook — no `sk_buff` is ever allocated for a blocked packet.
-
-**Where these two numbers come from:** the `stats` command on a running node, which reads the `LATENCY_HIST` map directly — that is the authoritative source, and the way to reproduce them. The bench harness *also* tries to sample latency over the WebSocket feed, but that capture path is broken: it connects and receives zero metrics frames, so the `.ws.csv` files in `bench/results/` are header-only. That's harness plumbing, not a datapath defect — see [Known issues](bench/README.md#known-issues--future-work). **The CPU and pps figures below are captured independently, from `/proc`, and are unaffected.**
-
-**CPU under load** — three 60-second workloads, medians of 3 runs each. Measured on a `veth` pair in **native-mode (driver) XDP** inside a VM, so absolute packet rates are bound by the VM's software path — **read the baseline↔Hakam delta, not the absolute pps.** Methodology and raw CSVs: [`bench/`](bench/README.md).
-
-| Workload | Baseline | Hakam | Reading |
-|---|:---:|:---:|---|
-| UDP flood | 4.9 % @ 134k pps | 5.6 % @ 166k pps | Hakam sustains *higher* pps at ~the same per-packet CPU (≈3.4 %/100k pps vs 3.7 %) — `XDP_DROP` is cheaper than the kernel's closed-port handling |
-| SQLi DPI stream | 0.30 % | 0.22 % | ~18 req/s; the difference is within run-to-run noise |
-
-A single high-rate source isn't shown as a "clean traffic" overhead figure on purpose: it trips Hakam's own 500 pps rate-limiter and auto-blocks itself within a second — real behavior, but not a PASS-path measurement.
-
-**For context, a different tool class.** ModSecurity — an L7 WAF that parses every full request in userspace — publishes ~107k → ~808 req/s once the full OWASP CRS is loaded ([defanator/modsecurity-performance](https://github.com/defanator/modsecurity-performance/wiki)). This is *not* a head-to-head: Hakam samples the first 64 bytes per segment in the kernel instead of parsing whole requests. It's here to frame *where* the cost of inline inspection lives — and why Hakam keeps the enforcement path (drop / deny) in the kernel and the parsing sampled.
-
-Raw CSVs: [`bench/results/`](bench/results/) · Reproduce: [`bench/README.md`](bench/README.md)
-
----
-
-## Signatures
-
-202 patterns across 13 families, matched case-insensitively against the first 64 bytes of each TCP segment.
-
-| Family | Examples |
-|--------|---------|
-| SQLi | `UNION SELECT`, `' OR '`, `DROP TABLE`, `WAITFOR DELAY` |
-| XSS | `<SCRIPT`, `JAVASCRIPT:`, `ONERROR=`, `<IFRAME` |
-| RCE | `;WHOAMI`, `\|/BIN/SH`, `BASH -C`, `$(CAT` |
-| LFI | `../`, `..%2F`, `%2E%2E%2F`, `/ETC/PASSWD` |
-| SSRF | `FILE://`, `DICT://`, `GOPHER://` |
-| Log4Shell | `${JNDI:` |
-| + 7 more | XXE, NoSQLi, SSTI, WebShell, Recon, CVE, Deserial |
-
----
+Signature detection is asynchronous: the sampled packet can reach the application
+before userspace installs a block. A connection policy already installed in the
+LSM map can deny a new connection at `connect()`. These are different enforcement
+paths; detecting a signature does not guarantee that the initial request was
+prevented.
 
 ## Quick start
 
-Two paths. **Docker** is the fastest way to see it work — one Linux host, no
-toolchain, no UI. **From source** adds the browser HUD.
+Use a Linux host or VM with kernel 5.15 or newer as the development baseline,
+root access, and eBPF support. Kernel version alone is insufficient: BPF-LSM
+connection enforcement also requires `CONFIG_BPF_LSM=y` and `bpf` in
+`/sys/kernel/security/lsm`. If the LSM hook is unavailable, the node reports the
+failure and continues with the other hooks.
 
-### Docker — no build toolchain, no UI
+### Docker demo
 
-Needs a real Linux kernel (≥ 5.8) and root; eBPF loads into the *host* kernel, so
-Docker Desktop on macOS/Windows will not work — use a VM or cloud instance.
+The image build includes the Rust and LLVM toolchain. Run these commands on the
+Linux host where Hakam will attach; Docker Desktop on macOS or Windows is not
+the supported demo environment.
 
 ```bash
-git clone https://github.com/realozk/hakam.git && cd hakam
-docker build -f packaging/docker/Dockerfile -t hakam:latest .   # ~10 min
+git clone https://github.com/realozk/hakam.git
+cd hakam
+docker build -f packaging/docker/Dockerfile -t hakam:latest .
 
-# Terminal 1 — arm Hakam + stand up a self-contained loopback target
+# Terminal 1: start the firewall and local demo target
 sudo HAKAM_DEMO=1 ./packaging/docker/run.sh
 
-# Terminal 2 — narrated 7-phase attack cycle (~4 min per loop)
+# Terminal 2: generate the demo traffic
 docker exec -it hakam /opt/hakam/scripts/demo-cycle.sh
 ```
 
-Terminal 1 is the live Hakam CLI — `stats`, `list`, `status`, `help`. Watch
-`▼ INTERCEPT` lines land there as the cycle fires. `docker stop hakam` detaches
-every kernel hook cleanly.
+In terminal 1, use `stats`, `list`, and `help` to inspect results. Stop with
+`docker stop hakam`. The container uses privileged access and host networking
+because its eBPF programs attach to the host kernel.
 
-The build runs inside a container, so no Rust toolchain, LLVM, or `bpf-linker`
-lands on your host. Full reviewer walkthrough, including how to get a Linux box
-if you're on a Mac or Windows: [`packaging/docker/REVIEW.md`](packaging/docker/REVIEW.md)
+See the [Docker walkthrough](packaging/docker/REVIEW.md) for individual scenarios
+and the [packaging guide](packaging/README.md) for systemd installation.
 
-### From source — with the browser HUD
+### Build from source
 
-This is the development path, and the only one that gives you the HUD. Linux
-≥ 5.15 on the VM side, Node ≥ 18 on whatever runs the browser.
+On Linux, install Rust, LLVM/Clang, and the eBPF linker, then start the demo:
 
 ```bash
-# ── VM (Linux) — one-time toolchain setup ──────────────────────────────────
+git clone https://github.com/realozk/hakam.git
+cd hakam
 rustup toolchain install nightly --component rust-src
-cargo install bpf-linker         # needs LLVM ≥ 14; this is the slow step
-
-# ── VM (Linux) ─────────────────────────────────────────────────────────────
-git clone https://github.com/realozk/hakam.git && cd hakam
-
-# One-time: boot the demo network
-./scripts/setup-demo.sh          # creates dummy0, adds 31 IP aliases
-
-# Build eBPF + launch hakam-node.
-# XDP attaches to `lo` because local-to-local traffic between dummy0 IP aliases
-# routes via loopback in the Linux kernel — that's where the packets actually flow.
-cargo xtask run --iface lo --mode skb --bind 0.0.0.0   # 0.0.0.0 so a HUD on another host can reach the WS
-
-# ── Mac (separate terminal) ────────────────────────────────────────────────
-cd hakam-ui && npm install                             # needs Node ≥ 18
-VITE_HAKAM_WS_URL=ws://<vm-ip>:8080/ws npm run dev     # point the HUD at the VM — see start_guide.md
-# Open http://localhost:5173 in a browser
-
-# ── Fire attacks (VM, third terminal) ──────────────────────────────────────
-./scripts/demo-cycle.sh          # narrated 7-phase cycle, ~4 min per loop
+cargo install bpf-linker --locked
+./scripts/setup-demo.sh
+cargo xtask run --iface lo --mode skb
 ```
 
-Full walkthrough with screenshots and troubleshooting: [`start_guide.md`](start_guide.md)  
-Pre-stage health check: `./scripts/preflight.sh`
+In another terminal on Linux:
 
----
-
-## Honest limitations
-
-Hakam is a signature-based inline DPI engine — not a WAF. Here's what it can't do:
-
-- **64-byte capture window per segment** — the eBPF sample is 64 bytes. Reassembly stitches segments together up to 256 bytes per flow, but bytes past that cap on a long flow are still invisible.
-- **Sampled-segment reassembly** — userspace reassembles segments in TCP sequence order (the kernel conntrack stamps each sampled segment's `seq`), so out-of-order delivery and retransmits are handled. The residual: only segments ≥64 B are sampled, so a payload split across a sub-64-byte segment leaves a hole, and sequence-number wraparound mid-flow isn't special-cased.
-- **ASCII case folding only** — the Aho-Corasick automaton folds A–Z ⇔ a–z, but Unicode homoglyphs and fullwidth characters are not normalised.
-- **Single-pass URL decoding** — `%XX` and `+` are decoded once as a fallback (so `UNION%20SELECT` and `UNION+SELECT` both match). Double-encoded payloads like `UNION%2520SELECT` are not recursively decoded.
-
-Full evasion corpus (30 mutations, hit/miss table): [`docs/evasion.md`](docs/evasion.md)
-
----
-
-## Repository layout
-
-```
-hakam-common/   shared no_std types (PayloadEvent, PAYLOAD_LEN)
-hakam-ebpf/     kernel BPF program — XDP + TC + rate limit + ring buffer
-hakam-node/     userspace — DPI engine, CLI, WebSocket server
-hakam-ui/       browser HUD — React + Tailwind + WebSocket client
-xtask/          build automation (cargo xtask run / build-ebpf)
-scripts/        demo, bench, preflight, evasion test
-docs/           architecture, runtime_flow, codebase, evasion, scripts reference
-bench/          benchmark rig and raw CSV results
-corpus/         replayable attack pcaps (SQLi, XSS, traversal, cmd injection)
-packaging/      Docker image, systemd unit, install script
+```bash
+./scripts/demo-cycle.sh
 ```
 
----
+Use `stats`, `list`, `rules`, and `help` in the node console. See the
+[setup guide](start_guide.md) for CLI commands and troubleshooting.
 
-## Docs
+## Signature coverage
 
-- [`docs/architecture.md`](docs/architecture.md) — kernel/userspace boundary diagram, map table, hook table
-- [`docs/codebase.md`](docs/codebase.md) — per-file walkthrough, eBPF verifier notes
-- [`docs/runtime_flow.md`](docs/runtime_flow.md) — packet lifecycle from NIC to block event
+The matcher uses case-insensitive ASCII substring matching with Aho-Corasick,
+followed by a single URL-decoding pass if the raw scan misses.
 
----
+| Family | Example patterns |
+|---|---|
+| SQLi | `UNION SELECT`, `DROP TABLE`, `WAITFOR DELAY` |
+| XSS | `<SCRIPT`, `JAVASCRIPT:`, `ONERROR=` |
+| RCE | `;WHOAMI`, `BASH -C` |
+| LFI | `../`, `..%2F`, `/ETC/PASSWD` |
+| SSRF | `FILE://`, `DICT://`, `GOPHER://` |
+| Log4Shell | `${JNDI:` |
+| Other families | XXE, NoSQLi, SSTI, WebShell, Recon, CVE, Deserial |
+
+These are signature families, not a guarantee of complete vulnerability coverage.
+The [evasion analysis](docs/evasion.md) records specific matches and misses.
+
+## Performance
+
+The [benchmark harness](bench/README.md) compares runs with and without Hakam on
+a Linux VM using a network namespace and `veth` pair. Raw measurements are in
+[bench/results](bench/results/). Results from this topology do not establish
+physical-NIC throughput or application response latency.
+
+The CLI's `stats` command reports XDP blocklist-drop latency from the kernel's
+`LATENCY_HIST` map. Percentiles are estimates from log2 histogram buckets, not
+exact timings. The existing WebSocket benchmark captures are header-only, so
+they do not provide a saved latency series. Record the host, kernel, interface
+mode, workload, and measurement window when reporting new results.
+
+## Limitations
+
+- **IPv4 coverage.** IPv6 filtering and general protocol inspection are outside the current implementation.
+- **Limited payload visibility.** Only eligible TCP segments with at least 64 available payload bytes are sampled, and only their first 64 bytes are inspected. The per-flow sample buffer is capped at 256 bytes and 4,096 flows.
+- **Partial reassembly.** Samples are sorted by TCP sequence number and duplicate sequences are ignored. Missing bytes, overlaps, conflicting retransmissions, and sequence wraparound are not fully reconstructed or validated.
+- **HTTP and plaintext scope.** The matcher requires a recognized HTTP request method. It does not decrypt TLS traffic or parse full requests.
+- **Encoding gaps.** Recursive URL decoding, Unicode normalization, SQL comment removal, and flexible whitespace matching are not implemented.
+- **Reactive signature blocking.** Initial sampled traffic can reach the application before a block is installed. The DPI path reports detections without checking map-insertion success. Process attribution is based on local connection observations and is not guaranteed for every block.
+- **Fixed capacity and rate policy.** The packet blocklist holds 1,024 entries. The 500-packet/s rate threshold applies independently per CPU and can block legitimate high-rate sources.
+- **Userspace expiry.** Packet blocks are removed by a periodic userspace sweep after the configured 120-second age; expiry is not a kernel-enforced deadline. Connection-policy entries use separate manual commands.
+
+Hakam should be evaluated against your own traffic and kernel configuration
+before use beyond an isolated test environment.
+
+## Repository guide
+
+| Directory | Contents |
+|---|---|
+| [hakam-common](hakam-common/) | Shared kernel/userspace types |
+| [hakam-ebpf](hakam-ebpf/) | XDP, TC, LSM, tracepoint, and flow maps |
+| [hakam-node](hakam-node/) | Controller, signature matcher, CLI, and telemetry |
+| [xtask](xtask/) | Build and launch commands |
+| [scripts](docs/scripts.md) | Demo, validation, replay, and benchmark tools |
+| [corpus](corpus/README.md) | Replayable attack packet captures |
+| [bench](bench/README.md) | Benchmark methodology and raw results |
+| [packaging](packaging/README.md) | Docker and systemd deployment files |
+
+## Documentation
+
+- [Setup and troubleshooting](start_guide.md)
+- [Architecture](docs/architecture.md)
+- [Runtime flow](docs/runtime_flow.md)
+- [Codebase reference](docs/codebase.md)
+- [Signature evasion analysis](docs/evasion.md)
+- [Script reference](docs/scripts.md)
+- [Proposed v2 architecture](docs/v2-architecture-plan.md) — design proposal; planned capabilities are not current features
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+Hakam is licensed under the [MIT License](LICENSE).

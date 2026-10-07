@@ -1,41 +1,48 @@
-# Attack PCAP corpus
+# Attack packet captures
 
-Small, in-repo packet captures of real attack requests, so a reviewer can
-**clone → replay → watch Hakam block them** in seconds — no synthetic harness,
-no external corpora to download.
+Four HTTP-request fixtures recorded on the local demo network, with target
+`10.99.0.10:80`. The replay script checks whether each source produces the
+expected signature-detection event.
+
+## Replay
+
+On Linux, install `tcpreplay` and `websocat`, then run from the repository root:
 
 ```bash
-# 1. run hakam-node on an interface (fresh, empty blocklist):
-cargo xtask run --iface lo --mode skb             # run as your user (no sudo prefix); or systemctl start hakam / docker run
-# 2. replay every capture and assert each is blocked:
+./scripts/setup-demo.sh
+cargo xtask run --iface lo --mode skb
+# In another terminal, with an empty packet blocklist:
 ./scripts/replay-corpus.sh
 ```
 
-Each capture is a single HTTP request from a fixed source IP, taken on the demo
-network (target `10.99.0.10:80`). `scripts/replay-corpus.sh` replays them with
-`tcpreplay` and confirms the expected `BLOCK` arrives on the telemetry feed.
+Use `clear` in the CLI before repeating a replay. Sources that are already
+blocked cannot deliver another payload sample. The script uses `lo` by default;
+check its `IFACE`, `WS_HOST`, and `WS_PORT` settings when using another topology.
 
-| PCAP | Source | Attack class | **Detected as** | Notes |
-|------|--------|--------------|-----------------|-------|
-| `sqli-union.pcap` | 10.99.2.11 | SQL injection | **SQLi** (`UNION SELECT`) | classic union-based read |
-| `xss-script.pcap` | 10.99.2.12 | Cross-site scripting | **XSS** (`<script>`) | reflected script tag |
-| `path-traversal.pcap` | 10.99.2.13 | Path traversal | **LFI** (`../`) | `../../../../etc/passwd` |
-| `cmd-injection.pcap` | 10.99.2.14 | OS command injection | **LFI** (`/etc/passwd`) | see honesty note below |
+| Capture | Source | Request class | Expected detection |
+|---|---|---|---|
+| `pcaps/sqli-union.pcap` | `10.99.2.11` | SQL injection | SQLi: `UNION SELECT` |
+| `pcaps/xss-script.pcap` | `10.99.2.12` | Cross-site scripting | XSS: `<script>` |
+| `pcaps/path-traversal.pcap` | `10.99.2.13` | Path traversal | LFI: `../` |
+| `pcaps/cmd-injection.pcap` | `10.99.2.14` | Command injection | LFI: `/etc/passwd` |
 
-## Honesty note — what actually fires
+The command-injection request contains `;cat /etc/passwd`; its expected match is
+an LFI token. Hakam also has RCE patterns, but this fixture does not demonstrate
+complete command-injection coverage. Labels describe the signature that fires.
 
-Hakam is a **signature** DPI engine, and its families are what they are. The
-`cmd-injection.pcap` payload is an OS-command-injection vector
-(`;cat /etc/passwd`), but Hakam has **no dedicated command-injection family** —
-it blocks this capture via the `/etc/passwd` token in its **LFI** signature set.
-We keep the capture (the block is real and useful) but label it by what actually
-matches, rather than claim command-injection coverage we don't have. The two LFI
-captures (`path-traversal`, `cmd-injection`) exercise different tokens (`../`
-vs a sensitive-file path).
+A `BLOCK` event reports a detection and an attempted blocklist action; the current
+DPI path does not check map-insertion success. It does not confirm
+that the initial sampled request was prevented, or that an exploit succeeded.
+The local listener does not execute the payloads.
 
-## Regenerating / adding captures
+## Add or regenerate a fixture
 
-Captures were taken with `tcpdump -i lo -w <name>.pcap 'host <src> and tcp port 80'`
-while sending the request from `<src>` to the demo target. To add one, capture a
-request whose attack token lands in the first 64 bytes (Hakam's sample window),
-confirm it blocks, and add a row above + an entry in `scripts/replay-corpus.sh`.
+Capture on the demo interface while sending a request from a fresh source:
+
+```bash
+sudo tcpdump -i lo -w corpus/pcaps/example.pcap 'host 10.99.2.15 and tcp port 80'
+```
+
+Place the expected token within the available 64-byte sample, verify the
+observed category, then update this table and `scripts/replay-corpus.sh`.
+Document request segmentation if it affects detection.

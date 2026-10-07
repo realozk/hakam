@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # arsenal-demo.sh — the Black Hat Arsenal pitch, in three acts.
 #
-# demo-cycle.sh is the ambient attract-loop that keeps the HUD alive on the
+# demo-cycle.sh is the ambient attract-loop that keeps traffic flowing on the
 # booth screen. THIS script is the 3-minute pitch you run when a reviewer stops
 # walking and gives you their attention. It tells the one story no other
 # open-source eBPF firewall can tell — the layered host firewall:
@@ -12,7 +12,7 @@
 #                            the packet is never created — all from one
 #                            self-contained host agent, no CNI, no control plane.
 #   FINALE  · THE PROOF    — live kernel counters: drops, sub-µs latency,
-#                            active conntrack flows, zero false positives.
+#                            active conntrack flows, benign sample observations.
 #
 # The pitch, in one sentence:
 #   "XDP guards the wire, BPF-LSM guards the syscall, per-flow conntrack ties
@@ -31,7 +31,7 @@
 #
 # ── Booth attract mode (the unattended screen that hooks passers-by) ─────────
 # Run with --loop: the pitch repeats forever, hands-free, driving a steady
-# attack stream so the HUD never sits idle — THREATS_NEUTRALIZED climbs, the
+# attack stream so the console continues reporting detections and the
 # topology pulses, the EVENT_LOG streams BLOCKs with per-process attribution,
 # the ATTACK_TIMELINE fills. It never touches kernel policy (nothing to leave
 # half-armed between cycles), so Act III degrades to a narration slate — unless
@@ -145,7 +145,7 @@ json_num() { sed -n 's/.*"'"$1"'":\([0-9][0-9]*\).*/\1/p'   <<<"$2" | tail -n1; 
 show_last_block() {
     local want_src="${1:-}"
     if [[ $HAVE_WS -eq 0 ]]; then
-        say "(install websocat for the live overlay — for now watch the Hakam console / HUD)"
+        say "(install websocat for the live overlay — for now watch the Hakam console)"
         return 0
     fi
     local line src cat sev act pid comm
@@ -189,7 +189,7 @@ fire_one() {
 }
 
 # Booth liveliness: fire a short background firehose (seclist's own rotating
-# 20-IP pool) so the HUD keeps animating during the narration. Only in auto/loop
+# 20-IP pool) to produce new terminal events during the narration. Only in auto/loop
 # modes — presenter mode stays a clean, readable terminal. Runs detached so it
 # never delays a beat.
 booth_burst() {
@@ -250,7 +250,7 @@ preflight() {
     if [[ $HAVE_WS -eq 1 ]]; then
         echo "  ${GRN}✓${RST} websocat present — live BLOCK overlay enabled"
     else
-        echo "  ${YLW}!${RST} websocat missing — overlay off (cargo install websocat). Console/HUD still shows everything."
+        echo "  ${YLW}!${RST} websocat missing — overlay off (cargo install websocat). Console still shows everything."
     fi
     [[ -x "$SECLIST" ]] || { echo "  ${BRED}✗${RST} ${SECLIST} missing"; blockers=$((blockers+1)); }
     if [[ $blockers -gt 0 ]]; then
@@ -279,10 +279,10 @@ intro() {
 
 # ── ACT I · THE WIRE ────────────────────────────────────────────────────────
 act_one() {
-    act_banner "I" "THE WIRE" "XDP drops the attack in the driver — before the kernel parses it" "$GRN"
+    act_banner "I" "THE WIRE" "Signature detection followed by XDP source filtering" "$GRN"
     clear_blocklist; nap 0.6
-    say "A compromised host at ${BLD}${WIRE_SRC}${RST}${DIM} fires a SQL-injection at the database."
-    say "There is no userspace proxy in this path. The verdict happens in the NIC driver."
+    say "A demo source at ${BLD}${WIRE_SRC}${RST}${DIM} sends a SQL-injection example to the test listener."
+    say "XDP samples the request; userspace matches it and attempts a source block."
     nap 0.4
     fire_one "SQLi" "$WIRE_SRC"
     show_last_block "$WIRE_SRC"
@@ -293,22 +293,22 @@ act_one() {
 
 # ── ACT II · THE IDENTITY ───────────────────────────────────────────────────
 act_two() {
-    act_banner "II" "THE IDENTITY" "the block names the originating PID + process — not just an IP" "$MAG"
+    act_banner "II" "THE IDENTITY" "Local connect observations can add PID and process metadata" "$MAG"
     clear_blocklist; nap 0.6
-    say "A firewall that only logs an IP tells you ${BLD}where${RST}${DIM}. Hakam tells you ${BLD}who${RST}${DIM}."
-    say "The sys_enter_connect tracepoint records every outbound connect(); when the"
-    say "DPI path blocks a flow, per-flow conntrack ties the drop back to the process."
+    say "The next scenario adds optional process metadata from local connect events."
+    say "The sys_enter_connect tracepoint observes local IPv4 connect attempts; when the"
+    say "DPI path detects a pattern, a destination/port correlation may identify a process."
     nap 0.4
     fire_one "SQLi" "$ID_SRC"
     show_last_block "$ID_SRC"
     if [[ -n "${LAST_PID:-}" && -n "${LAST_COMM:-}" ]]; then
-        punch "\"blocked ${LAST_CAT:-SQLi} from ${LAST_SRC:-$ID_SRC}, originating PID ${LAST_PID} / ${LAST_COMM}\""
-        say "That sentence is the whole pitch. Falco can log the syscall; Cilium can drop the"
-        say "packet. Naming the process on the same drop, at line rate, is the differentiator."
+        punch "\"blocked ${LAST_CAT:-SQLi} from ${LAST_SRC:-$ID_SRC}, correlated PID ${LAST_PID} / ${LAST_COMM}\""
+        say "The reported process is the most recent local connection to this endpoint."
+        say "This is heuristic correlation, not guaranteed attribution for every flow."
     else
-        punch "The BLOCK carries PID + comm — see the ${BLD}origin:${RST}${BLD} line in the Hakam console / HUD.${RST}"
+        punch "Process correlation is unavailable on this overlay; check for an ${BLD}origin:${RST}${BLD} line in the Hakam console.${RST}"
         say "(No attribution on the overlay this run — the tracepoint may be CIDR-scoped away"
-        say " from ${ID_SRC}, or websocat is off. The console still prints the origin line.)"
+        say " from ${ID_SRC}, or websocat is off. Inspect the console for any available correlation.)"
     fi
     booth_burst
     beat 7
@@ -318,7 +318,7 @@ act_two() {
 act_three() {
     act_banner "III" "THE SYSCALL" "BPF-LSM denies the connect() itself — zero packets created" "$BRED"
     say "Now the host is the threat: something on it is trying to beacon out / exfiltrate."
-    say "Layers 1-2 kill packets on the wire. Layer 3 kills the ${BLD}syscall${RST}${DIM}."
+    say "XDP/TC filter packets. BPF-LSM can deny a new ${BLD}connect()${RST}${DIM} attempt."
     echo
 
     # Loop/booth mode is unattended: never prompt, never toggle kernel policy
@@ -378,7 +378,7 @@ act_three() {
     else
         say "If that still connected: the LSM hook isn't enforcing — the kernel likely lacks"
         say "CONFIG_BPF_LSM=y or 'bpf' in /sys/kernel/security/lsm (Hakam degrades to"
-        say "observe-only and says so at startup). The XDP + attribution story stands regardless."
+        say "unavailable and says so at startup). Inspect startup output for the remaining active hooks."
     fi
     echo
     say "Restore it — in the console: ${CYN}policy-unblock ${LSM_DST}${RST}"
@@ -389,16 +389,16 @@ act_three() {
 finale() {
     act_banner "IV" "THE PROOF" "live kernel counters — nothing here is fabricated" "$CYN"
     # The "type stats" call-to-action is for a live presenter; skip it in the
-    # unattended booth loop where the HUD itself is the proof on screen.
+    # unattended booth loop where the terminal output shows the events.
     if [[ $LOOP -eq 0 ]]; then
         say "In the ${BLD}Hakam console${RST}${DIM}, type ${CYN}stats${RST}${DIM}. Narrate four numbers:"
         echo
         echo "    ${BLD}active flows${RST}      ${DIM}— live eBPF conntrack table (kernel, not userspace)${RST}"
-        echo "    ${BLD}kernel drops${RST}      ${DIM}— every XDP_DROP / TC_ACT_SHOT this session${RST}"
-        echo "    ${BLD}drop latency p50/p99${RST} ${DIM}— sub-microsecond, measured in-kernel${RST}"
-        echo "    ${BLD}benign passed${RST}     ${DIM}— legitimate traffic, zero false positives${RST}"
+        echo "    ${BLD}kernel drops${RST}      ${DIM}— XDP drop counter since node startup${RST}"
+        echo "    ${BLD}drop latency p50/p99${RST} ${DIM}— log2 histogram estimates of the blocklist-drop branch${RST}"
+        echo "    ${BLD}HTTP without match${RST}     ${DIM}— HTTP samples without a signature match${RST}"
         echo
-        say "For a side terminal that proves the HUD isn't lying:"
+        say "For an additional kernel-observation terminal:"
         echo "      ${CYN}./scripts/bpftrace-overlay.sh drops${RST}   ${DIM}(reads the counters straight from the kernel)${RST}"
         echo
     fi
@@ -416,7 +416,7 @@ beat 5
 ws_start
 
 if [[ $LOOP -eq 1 ]]; then
-    # Unattended booth attract loop. Repeats until Ctrl-C; the HUD stays alive.
+    # Unattended booth attract loop. Repeats until Ctrl-C; the terminal traffic stream continues.
     cycle=0
     while true; do
         cycle=$((cycle + 1))

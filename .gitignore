@@ -1,10 +1,4 @@
 /target/
-hakam-ui/src-tauri/target/
-hakam-ui/dist/
-*.tsbuildinfo
-
-node_modules/
-
 /.idea/
 /.vscode/
 *.swp

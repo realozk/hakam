@@ -1,28 +1,15 @@
 #!/usr/bin/env bash
-# attack-on-demand.sh — fires ONE real attack each time the HUD's
-# "⚡ Simulate Attack" button is pressed, so an interception can be shown live
-# WITHOUT running the whole narrated demo-cycle.
+# attack-on-demand.sh — command-file driven signature/evasion examples.
 #
-# Flow (every piece is real — nothing is faked in the UI):
-#   HUD button → DEMO_CMD 'a' over WebSocket → hakam-node writes 'a' to
-#   /tmp/hakam-demo.cmd → this watcher reads it and fires one attack via
-#   seclist-attack.sh → the kernel samples the payload → the DPI engine matches
-#   a signature → the source is pushed into the BLOCKLIST → hakam-node emits a
-#   BLOCK event → the HUD lights up with the interception.
+# Start setup-demo.sh and hakam-node on Linux, then leave this watcher running:
+#   ./scripts/attack-on-demand.sh
+# In another Linux terminal, write a command:
+#   printf 'a\n' > /tmp/hakam-demo.cmd   # signature example
+#   printf 'e\n' > /tmp/hakam-demo.cmd   # evasion example
 #
-# Run this on the VM, alongside hakam-node (which must be attached to the
-# interface the demo traffic flows on — `lo` for the setup-demo.sh network):
-#
-#   ./scripts/setup-demo.sh                                  # once
-#   cargo xtask run --iface lo --mode skb --bind 0.0.0.0     # hakam-node
-#   ./scripts/attack-on-demand.sh                            # leave this running
-#   # …then press ⚡ Simulate Attack in the HUD (or the 'a' key)
-#
-# Do NOT run this at the same time as demo-cycle.sh — both drain the same
-# command file.
-#
-# Env overrides:  TARGET (default 10.99.0.10)   PORT (default 80)
-# If attacks don't register, re-run with sudo:  sudo -E ./scripts/attack-on-demand.sh
+# A telemetry client can also send a DEMO_CMD to the node. The watcher reads
+# the same command file. Run one driver at a time: demo-cycle.sh also drains it.
+# Env overrides: TARGET (10.99.0.10), PORT (80), WS_PORT (8080).
 
 set -uo pipefail
 
@@ -39,8 +26,8 @@ DIM=$'\033[2m'; BLD=$'\033[1m'; RST=$'\033[0m'
 [[ -f "$SECLIST" ]] || { echo "${RED}✗ seclist-attack.sh not found at $SECLIST${RST}" >&2; exit 1; }
 
 # Real, matchable attack payloads (family|HTTP-path). Each carries a signature in
-# the first 64 B, so Hakam GENUINELY detects and blocks it — the HUD block is real
-# (from kernel detection), not reported. Sent foreground below so the payload
+# the first 64 B, where the matcher can inspect it. Detection attempts a source
+# block; confirm the outcome in the node console. Sent foreground so the payload
 # always lands (seclist backgrounded nc and often got cut short).
 ATTACKS=(
   "SQLi|/search?q=' OR '1'='1 UNION SELECT username,password FROM users--"
@@ -87,7 +74,7 @@ fire_one() {
 # A documented EVASION: double-URL-encoded SQLi. Hakam single-pass-decodes once,
 # so %2520 -> %20 (a literal, not a space) and "UNION SELECT" never forms — it is
 # NOT detected. The payload still reaches the target, proving the bypass. We then
-# report it to the HUD (via the node's WS) so the miss is shown honestly.
+# report the test assertion over telemetry for connected observers.
 fire_evasion() {
     local src="${POOL[$RANDOM % ${#POOL[@]}]}"
     echo "  ${YLW}⚠ evasion${RST}  ${BLD}SQLi (double-encoded)${RST}  ${DIM}from${RST} ${CYN}${src}${RST}  ${DIM}→ ${TARGET}:${PORT} — Hakam should MISS this${RST}"
@@ -99,7 +86,7 @@ fire_evasion() {
 report_evasion() {
     local src="$1"
     if ! command -v websocat >/dev/null 2>&1; then
-        echo "  ${DIM}(websocat not installed — HUD won't show the EVADED marker)${RST}"
+        echo "  ${DIM}(websocat not installed — evasion telemetry report skipped)${RST}"
         return 0
     fi
     local msg="{\"type\":\"EVASION\",\"family\":\"SQLi\",\"source\":\"${src}\",\"target\":\"${TARGET}\",\"detail\":\"double-encoded payload reached ${TARGET}:${PORT} undetected\"}"
@@ -108,7 +95,7 @@ report_evasion() {
 
 echo
 echo "  ${BLD}Hakam · attack-on-demand${RST}   ${DIM}target=${TARGET}:${PORT}${RST}"
-echo "  ${DIM}watching ${CMD_FILE} — press ⚡ Simulate Attack in the HUD (or the 'a' key)${RST}"
+echo "  ${DIM}watching ${CMD_FILE} — write 'a' for a signature example or 'e' for evasion${RST}"
 echo "  ${DIM}Ctrl-C to stop.${RST}"
 echo
 

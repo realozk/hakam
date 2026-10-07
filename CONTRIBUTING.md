@@ -1,65 +1,61 @@
 # Contributing to Hakam
 
-Thanks for taking the time to look at Hakam. It's a single-host, single-binary
-eBPF firewall meant to be small enough to **read end to end**, so contributions
-that keep it auditable and honest are especially welcome.
+Contributions that improve correctness, documentation, and reproducibility are
+welcome. Hakam is a Linux eBPF research project; changes should make its behavior
+and limitations easy to inspect.
 
-## Ways to help
+## Report an issue
 
-- **Report a bug** — open an issue with your kernel version (`uname -r`), the
-  interface/mode you attached with, and the exact command that failed.
-- **Improve the docs** — if a step in [`start_guide.md`](start_guide.md) or
-  [`packaging/docker/REVIEW.md`](packaging/docker/REVIEW.md) didn't work on your
-  setup, that's a real bug worth a PR.
-- **Add or fix a signature** — see the corpus in `hakam-node/src/signatures.rs`
-  and the evasion notes in [`docs/evasion.md`](docs/evasion.md).
-- **Close a known limitation** — the [Honest limitations](README.md#honest-limitations)
-  section is the honest to-do list.
+For bugs, include the kernel version (`uname -r`), interface, XDP mode, exact
+command, relevant logs, and steps to reproduce. For telemetry issues, include
+the client command and the messages received.
+
+Report security vulnerabilities through the process in [SECURITY.md](SECURITY.md).
+For setup problems, identify the step in the [setup guide](start_guide.md) or
+[Docker walkthrough](packaging/docker/REVIEW.md) that failed.
 
 ## Development setup
 
-Hakam builds and runs on **Linux only** (kernel ≥ 5.15) — eBPF/XDP/BPF-LSM live
-in the Linux kernel. macOS/Windows can develop the UI, but the node must run on
-a Linux host or VM.
+Follow the [setup guide](start_guide.md). The kernel programs and full node run
+on Linux; userspace library tests can run on other supported platforms.
+The workspace uses Rust nightly. Build the eBPF object with:
 
 ```bash
-# Toolchain
-rustup toolchain install nightly --component rust-src
-cargo install bpf-linker          # needs LLVM ≥ 14; ~10 min to build
-
-# Build the eBPF object + userspace node, then run
 cargo xtask build-ebpf
-cargo xtask run --iface lo --mode skb --bind 0.0.0.0
 ```
 
-The browser HUD lives in `hakam-ui/` (React + Vite): `npm install && npm run dev`.
+## Validate a change
 
-Full walkthrough — VM setup, the demo network, troubleshooting — is in
-[`start_guide.md`](start_guide.md). Repo architecture and the kernel/userspace
-boundary are in [`docs/architecture.md`](docs/architecture.md) and
-[`docs/codebase.md`](docs/codebase.md).
+Run checks appropriate to the files changed:
 
-## Before you open a pull request
+```bash
+# Shared types, matcher, reassembly, and userspace tests
+cargo test
 
-1. **Run the tests** — `cargo test` (userspace unit + integration tests).
-2. **Keep it building** — `cargo build -p hakam-node --features linux` and
-   `cargo xtask build-ebpf` both succeed. CI runs these on every PR
-   (`.github/workflows/ci.yml`, `.github/workflows/ebpf.yml`).
-3. **Match the surrounding style** — no new dependencies without a reason, and
-   keep kernel-side code within the eBPF verifier's constraints (no loops, no
-   heap, bounded access — see the verifier notes in `docs/codebase.md`).
-4. **Be honest about limits** — if a change narrows or widens what Hakam can
-   detect or enforce, update the README's limitations and, if relevant,
-   `docs/evasion.md`. Overclaiming is the one thing this project won't ship.
+# Linux controller build (on Linux)
+cargo build -p hakam-node --features linux
 
-## Pull request process
+# Kernel program build
+cargo xtask build-ebpf
+```
 
-- Branch off `main`, keep the change focused, and describe **what** it does and
-  **why** in the PR body.
-- Reference the issue it closes, if any.
-- Green CI is required before merge.
+A successful eBPF build does not prove the kernel verifier accepts the program.
+For kernel-path changes, load it on the target Linux configuration and exercise
+the relevant scenario. See [script reference](docs/scripts.md) for smoke,
+validation, and evasion checks.
+
+## Submit a pull request
+
+1. Branch from `main` and keep the change focused.
+2. Explain the problem, resulting behavior, and validation performed.
+3. Add tests for meaningful logic or ABI changes; describe Linux checks where required.
+4. Update documentation when detection coverage, enforcement, configuration, or setup changes.
+5. Resolve CI failures before requesting review.
+
+Keep kernel accesses bounded and compatible with the verifier. Document new
+dependencies and resource limits. Distinguish observed detections from confirmed
+containment, and planned features from implemented behavior.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the
-project's [MIT License](LICENSE).
+Contributions are licensed under the project's [MIT License](LICENSE).

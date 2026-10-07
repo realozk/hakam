@@ -1,283 +1,122 @@
-# Hakam — Scripts Reference
+# Script reference
 
-All scripts live in `scripts/`. Run them from the repo root inside the VM unless noted otherwise.
+Run scripts from the repository root on Linux unless noted. Demo scripts target
+an isolated local network; inspect defaults before selecting a different target.
 
----
+## Local demonstration
 
-## Demo — run order on stage
+| Script | Purpose | Requirements / notes |
+|---|---|---|
+| `setup-demo.sh` | Creates `dummy0`, address aliases, and the no-op target at `10.99.0.10:80` | `sudo`, `iproute2`, Python 3; modifies interface reverse-path filtering |
+| `demo-cycle.sh` | Repeating seven-phase traffic sequence with background benign requests | Run after setup and node startup; roughly four minutes per cycle |
+| `seclist-attack.sh` | Sends signature examples by family from rotating source addresses | netcat; `-l` lists available families |
+| `benign-traffic.sh` | Sends a bounded set of clean HTTP examples from `10.99.3.x` | Sample results do not establish a general false-positive rate |
+| `attack-on-demand.sh` | Watches `/tmp/hakam-demo.cmd` for attack/evasion commands | Run one driver at a time; shares the file with `demo-cycle.sh` |
+| `arsenal-demo.sh` | Presenter-paced packet, process-observation, and connection-policy scenarios | Some steps require CLI input; optional `websocat` overlay |
+| `attack.sh` | Earlier multi-scenario driver | Uses its own interface/target defaults; requires `hping3`, curl, and netcat |
+| `target-listener.py` | Accepts demo TCP requests | No-op target; does not execute the request payload |
 
-### `setup-demo.sh`
-**Run once per VM boot, before anything else.**
-
-Creates `dummy0` if it doesn't exist, brings it up, and adds every IP alias the demo needs:
-- `10.99.0.10` — target (database)
-- `10.99.1.10`, `10.99.2.10` — workstations PC#1 / PC#2
-- `10.99.1.11–19`, `10.99.2.11–19` — 18 rotating attack sources
-- `10.99.3.10–19` — 10 benign sources (separate pool so blocked attackers never silence real users)
-
-Also relaxes `rp_filter` on `dummy0` so spoofed-source packets aren't silently dropped.
+Typical order:
 
 ```bash
 ./scripts/setup-demo.sh
+cargo xtask run --iface lo --mode skb
+# In another Linux terminal:
+./scripts/demo-cycle.sh
 ```
 
----
+The aliases reside on `dummy0`, but local alias traffic passes through `lo`.
+See [the setup guide](../start_guide.md) for CLI commands and troubleshooting.
 
-### `arsenal-demo.sh`
-**The Arsenal pitch — the 3-minute story you run when a reviewer stops walking.** Where `demo-cycle.sh` is the ambient attract-loop, this narrates the layered-firewall differentiator in three acts, ending on `stats`. It's the terminal companion to the demo video (#16).
-
-| Act | Layer | What the audience sees |
-|-----|-------|------------------------|
-| I · THE WIRE | XDP | A SQLi from an external host is dropped in the driver, pre-stack. |
-| II · THE IDENTITY | attribution | The same block names the originating **PID + process** — the marquee line *"blocked SQLi from 10.99.1.13, originating PID N / nc"*. |
-| III · THE SYSCALL | BPF-LSM | A local `connect()` to an armed destination returns **EPERM in ~0 ms** — the packet is never created. |
-| IV · THE PROOF | conntrack | Guides you to `stats`: active flows, kernel drops, sub-µs latency, zero false positives. |
-
-Acts I/II are fully driven by the script (it fires the attacks and reads the BLOCK straight off the WebSocket feed). Act III needs one line typed in the Hakam console — `policy-block <target>` — which the script detects and continues from; that keystroke *is* the demo (arming an exfil-denial rule live).
+### Cycle controls
 
 ```bash
-./scripts/arsenal-demo.sh              # presenter-paced (ENTER between beats)
-./scripts/arsenal-demo.sh --auto       # hands-free timed pacing (for screen recording)
-./scripts/arsenal-demo.sh --fast       # halve every pause
-# env overrides: TARGET, PORT, WS_HOST, WS_PORT, WIRE_SRC, ID_SRC
+./scripts/demo-cycle.sh --manual
+./scripts/demo-cycle.sh --start-at 3
 ```
 
-Prerequisites: `hakam-node` running, `setup-demo.sh` has run, `nc`, `curl`. Optional: `websocat` (live BLOCK overlay; without it the console/HUD still shows everything).
+`space` pauses, `n` advances, `r` restarts a phase, `0`–`6` selects a phase,
+`q` exits, and `?` displays help. The phase names and durations are in the
+[setup guide](../start_guide.md#3-generate-traffic).
 
----
-
-### `demo-cycle.sh`
-**The main demo driver.** Loops through 6 phases (~113 s per cycle) that take the threat level from NOMINAL → SEVERE → back, exercising every visual on the HUD. Blends benign traffic into every phase (5:1 benign:attack ratio during calm phases, 1:1 during PEAK).
-
-| Phase | Name | Duration | What fires |
-|------:|------|:--------:|-----------|
-| 0 | BASELINE | 12 s | 6 benign requests — calm metrics |
-| 1 | FIRST CONTACT | 12 s | 1 SQLi + 1 XSS, 10 benign |
-| 2 | RECON SWEEP | 10 s | 8 Recon bursts, 40 benign (5:1) |
-| 3 | MULTI-VECTOR | 24 s | 1 shot per family (11 families), 55 benign |
-| 4 | PEAK ASSAULT | 20 s | 100 random attacks at 6/s, 100 benign (1:1) |
-| 5 | COOLDOWN | 35 s | No attacks, 5 benign — threat level decays |
-
-**Live controls** (no Enter needed):
-
-| Key | Action |
-|-----|--------|
-| `space` | Pause / resume |
-| `n` | Skip to next phase |
-| `r` | Restart current phase |
-| `0`–`5` | Jump to phase N |
-| `q` | Quit |
-| `?` | Show keymap |
-
-**Flags:**
+### Selected traffic samples
 
 ```bash
-./scripts/demo-cycle.sh                # auto loop
-./scripts/demo-cycle.sh --manual       # wait for ENTER before each phase
-./scripts/demo-cycle.sh --start-at 3  # begin at phase 3
+./scripts/seclist-attack.sh -l
+./scripts/seclist-attack.sh -k SQLi -n 5
+./scripts/seclist-attack.sh -n 100 -d 500
+./scripts/benign-traffic.sh -n 20
 ```
 
----
+Use `-t 10.99.0.10:80` to set the target for either traffic generator. A signature
+match creates a source block; clear existing blocks before repeating a test.
 
-### `attack.sh`
-**Legacy four-scenario attack script.** Runs SQLi, SYN flood, LFI, and RCE scenarios in sequence, pausing between each so you can narrate. Predates `demo-cycle.sh` — use `demo-cycle.sh` for the polished 6-phase story; use this for quick ad-hoc testing.
+### Presenter-paced sequence
 
 ```bash
-./scripts/attack.sh [IFACE] [TARGET_IP]
-# defaults: dummy0  10.99.0.1
+./scripts/arsenal-demo.sh
+./scripts/arsenal-demo.sh --auto
+./scripts/arsenal-demo.sh --fast
 ```
 
-Prerequisites: `hping3`, `curl`, `nc`.
+This sequence demonstrates signature detection, optional heuristic process
+correlation, a manually armed LSM destination rule, and CLI counters. It does
+not establish universal attack prevention or zero false positives. Use startup
+logs to verify that LSM enforcement is available before its scenario.
 
----
+## Health and validation
 
-### `seclist-attack.sh`
-**Randomised attack payload firehose.** Self-contained corpus of ~200 payloads across 12 attack families (SQLi, XSS, RCE, LFI, SSRF, XXE, Log4Shell, NoSQLi, SSTI, WebShell, Recon, CVE). Called internally by `demo-cycle.sh`; also useful standalone for testing new signatures or running evasion experiments.
+| Script | Purpose | Requirements / scope |
+|---|---|---|
+| `smoke.sh` | Checks a running node, WebSocket events, and block/unblock behavior | `websocat`, netcat; may change test block state |
+| `preflight.sh` | Checks the macOS/OrbStack demo workflow | Run on macOS; defaults to an OrbStack machine named `hakam` |
+| `validate_phase1.sh` | Builds/loads the node and exercises signatures, decoding, reassembly, and tracepoint scope | Linux, Cargo, netcat, `websocat`, `jq`, passwordless sudo, demo setup |
+| `evasion-test.sh` | Sends 30 mutations and reports observed hits/misses | Linux, running node, `dummy0`, `websocat`; creates temporary source aliases |
+| `replay-corpus.sh` | Replays the four PCAP fixtures and checks expected detection categories | Linux, `tcpreplay`, `websocat`, running node, empty packet blocklist |
 
-```bash
-./scripts/seclist-attack.sh                  # 30 random shots
-./scripts/seclist-attack.sh -n 100           # 100 shots
-./scripts/seclist-attack.sh -c               # continuous (Ctrl-C to stop)
-./scripts/seclist-attack.sh -k SQLi          # one family only
-./scripts/seclist-attack.sh -k XSS -n 50    # 50 XSS payloads
-./scripts/seclist-attack.sh -l               # list categories + payload counts
-./scripts/seclist-attack.sh -d 500           # 500ms between shots
-./scripts/seclist-attack.sh -t 10.99.0.10:80
-```
-
----
-
-### `benign-traffic.sh`
-**Legitimate HTTP traffic generator.** Proves Hakam's zero false-positive rate by sending clean GET requests from a dedicated benign pool (`10.99.3.x`) that never overlaps with the attack pool. Called silently in the background by `demo-cycle.sh`; run standalone to test or demonstrate the `benign_passed` counter in `stats`.
-
-24 clean paths (e.g. `/products`, `/api/v1/users?page=1`, `/health`) across 5 realistic user agents (Chrome, Safari, Firefox, curl, Safari mobile).
-
-```bash
-./scripts/benign-traffic.sh              # 20 requests, 400ms apart
-./scripts/benign-traffic.sh -n 50       # 50 requests
-./scripts/benign-traffic.sh -c          # continuous
-./scripts/benign-traffic.sh -d 200      # 200ms between requests
-./scripts/benign-traffic.sh -t 10.99.0.10:80
-```
-
-After running, check hakam-node: `stats` → `benign passed` should be non-zero with no blocks for `10.99.3.x`.
-
----
-
----
-
-### `evasion-test.sh`
-**Runs 30 payload mutations through a live Hakam instance and reports HIT or MISS for each.** Used to populate `docs/evasion.md` and verify the table is still accurate after signature changes. Not needed during demos — run it in the VM before a talk to confirm nothing regressed.
-
-Spawns transient source IPs on `10.99.4.x` (one per test, removed on exit) so each mutation gets a fresh, unblocked source.
-
-```bash
-./scripts/evasion-test.sh
-# env overrides:
-TARGET=10.99.0.10 WS_PORT=8080 ./scripts/evasion-test.sh
-```
-
-Prerequisites: `websocat` (`cargo install websocat`), `hakam-node` running, `dummy0` up.
-
----
-
-## Health checks
-
-### `preflight.sh`
-**Run on the Mac ~60 s before going on stage.** Walks 16 checks across Mac tooling, VM reachability, kernel modules, build artifacts, and port state. Emits a single PASS / FAIL verdict with colour-coded results and fix hints for every failure.
-
-```bash
-./scripts/preflight.sh
-# env overrides:
-VM_NAME=hakam ./scripts/preflight.sh
-WS_PORT=8080    ./scripts/preflight.sh
-```
-
-Exit code `0` = stage-ready. Exit code `1` = at least one blocker.
-
----
-
-### `smoke.sh`
-**Post-boot sanity check for hakam-node.** Verifies the process is alive, the WebSocket accepts connections, METRICS events arrive within 3 s, BLOCK/UNBLOCK round-trips work, and the blocklist is clean after the test. Faster than `preflight.sh`; run this after `cargo xtask run` to confirm the binary is healthy before running the full preflight.
+Examples:
 
 ```bash
 ./scripts/smoke.sh
-# env overrides:
 WS_HOST=localhost WS_PORT=8080 ./scripts/smoke.sh
+./scripts/evasion-test.sh
+./scripts/replay-corpus.sh
 ```
 
-Prerequisites: `websocat` (`cargo install websocat`), `nc`.
+See [evasion.md](evasion.md) for expected matcher outcomes and
+[corpus/README.md](../corpus/README.md) for replay details. Live packet boundaries
+can affect results; a userspace test is distinct from a kernel load/traffic check.
 
----
+## Benchmarking
 
-### `validate_phase1.sh`
-**Acceptance suite for the Phase 1 changes** (Aho-Corasick + URL decoding + TCP reassembly + B2 tracepoint scope). Builds the eBPF, launches hakam-node on `lo` with `--monitor-prefix 10.99.0.0/16`, then fires six probes and verifies each produced the expected WebSocket telemetry:
-
-1. eBPF build / verifier go-no-go
-2. Launch + B2 banner + telemetry pipe up
-3. Regression — classic single-segment SQLi + XSS still block
-4. URL decoding — `%20`-encoded SQLi and `+`-encoded SQLi both match
-5. Split-segment reassembly — two TCP writes with `sleep 0.2` between, expects a BLOCK on the reassembled view
-6. Tracepoint CIDR scope — in-scope CONNECT surfaces, out-of-scope is filtered
+| Script | Purpose |
+|---|---|
+| `bench-setup.sh` | Creates a `veth` pair and `phbench-gen` network namespace |
+| `bench-run.sh` | Runs `clean`, `flood`, or `dpi` traffic and writes CSV measurements |
+| `bench-teardown.sh` | Removes the benchmark namespace and interfaces |
 
 ```bash
-./scripts/validate_phase1.sh
-# env overrides:
-TARGET_IP=10.99.0.10 TARGET_PORT=80 ./scripts/validate_phase1.sh
-MONITOR_PREFIX=10.99.0.0/24 OUT_OF_SCOPE_IP=127.0.0.1 ./scripts/validate_phase1.sh
+./scripts/bench-setup.sh
+./scripts/bench-run.sh -w flood -l baseline-flood -d 60
+# Start Hakam on phbench0 separately, then repeat:
+./scripts/bench-run.sh -w flood -l hakam-flood -d 60
+./scripts/bench-teardown.sh
 ```
 
-Prerequisites: `cargo`, `nc`, `websocat`, `jq`, passwordless `sudo`, and `setup-demo.sh` has run (binds the `10.99.x.y` aliases the probes fire from).
+Keep baseline and Hakam conditions comparable. A `clean` run can trigger the
+rate policy, so verify no blocks before calling it a PASS-path measurement.
+The [benchmark guide](../bench/README.md) explains topology, output, and known
+WebSocket capture failures.
 
-Exit `0` = all six green. Exit `1` = at least one probe failed; logs are preserved under `/tmp/hakam-validate-*.log` for inspection. Run before starting Phase 2 work — this is the gate that catches BPF verifier rejections of the new `xdp.rs` bounds check.
-
----
-
-## Benchmark
-
-### `bench-setup.sh`
-**Provisions the benchmark rig.** Creates a `veth` pair across a network namespace (`phbench-gen`) so traffic traverses the real kernel network stack — much closer to a real NIC than `dummy0`, and supports native-mode XDP. Idempotent.
-
-```
-netns phbench-gen           root ns
-  phbench-gen (10.200.0.2)  ──veth──  phbench0 (10.200.0.1)
-  (load generator)                    (Hakam attaches here)
-```
+## Additional observability
 
 ```bash
-sudo ./scripts/bench-setup.sh
-```
-
----
-
-### `bench-run.sh`
-**Runs one benchmark workload and writes a CSV row.** Run twice — once with hakam-node down (baseline) and once with it attached to `phbench0`. Diffing the two gives Hakam's overhead.
-
-| Workload | What it measures |
-|----------|-----------------|
-| `clean` | Short TCP HTTP GETs, no signature hits — PASS path overhead |
-| `flood` | UDP flood from netns — rate-limit + drop path |
-| `dpi` | HTTP with SQLi payloads — DPI loop overhead |
-
-Outputs go to `bench/results/<label>-<ts>.csv` (summary) and `bench/results/<label>-<ts>.ws.csv` (raw WebSocket samples).
-
-```bash
-./scripts/bench-run.sh -w clean -l baseline-clean
-./scripts/bench-run.sh -w clean -l hakam-clean
-./scripts/bench-run.sh -w flood -l hakam-flood -d 90
-./scripts/bench-run.sh -w dpi   -l hakam-dpi
-```
-
-See `bench/README.md` for the full reproduction procedure.
-
----
-
-### `bench-teardown.sh`
-**Undoes `bench-setup.sh`.** Removes `phbench0` (deletes both veth ends) and the `phbench-gen` netns. Idempotent.
-
-```bash
-sudo ./scripts/bench-teardown.sh
-```
-
----
-
-## Observability
-
-### `bpftrace-overlay.sh`
-**Live kernel counters in a side terminal.** Every number shown here is read directly from the kernel — useful on stage to prove the HUD is not fabricating data.
-
-| Mode | What it shows |
-|------|--------------|
-| `drops` | XDP_DROP events per second (default) |
-| `latency` | Histogram of XDP program run time in nanoseconds |
-| `connects` | Every outbound `connect()` with PID and comm |
-| `all` | Instructions for running all three in separate panes |
-
-```bash
-./scripts/bpftrace-overlay.sh           # drop counter
+./scripts/bpftrace-overlay.sh drops
 ./scripts/bpftrace-overlay.sh latency
 ./scripts/bpftrace-overlay.sh connects
 ./scripts/bpftrace-overlay.sh all
 ```
 
-Prerequisites: `bpftrace` installed in the VM.
-
----
-
-## Quick-reference order for a live demo
-
-```
-# VM — once per boot
-./scripts/setup-demo.sh
-cargo xtask run --iface lo --mode skb
-
-# Mac — 60 s before stage
-./scripts/preflight.sh
-
-# VM — in a second terminal, when you're ready
-./scripts/arsenal-demo.sh      # the 3-act pitch (reviewer stopped at the booth)
-./scripts/demo-cycle.sh        # OR the ambient attract-loop (booth screen on repeat)
-
-# VM — optional side terminal (proves HUD isn't lying)
-./scripts/bpftrace-overlay.sh drops
-```
+Requires `bpftrace` and suitable kernel probe access. The overlay observes kernel
+activity; its program runtime histogram is a different measurement from the
+node's blocklist-drop histogram. Treat probe availability as kernel-dependent.

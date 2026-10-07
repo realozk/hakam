@@ -49,7 +49,7 @@ use crate::{
     name = "hakam-node",
     author = "Hakam Security",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Kernel-level XDP packet filtering. No rules. No mercy.",
+    about = "Linux eBPF firewall with packet filtering and outbound connection policy.",
     long_about = None,
 )]
 pub struct Args {
@@ -139,13 +139,13 @@ pub fn print_banner() {
     println!(
         "  {} {}    {}",
         "HAKAM".bright_red().bold(),
-        "// kernel-resident eBPF firewall".bright_black(),
+        "// Linux eBPF firewall".bright_black(),
         format!("v{}", env!("CARGO_PKG_VERSION")).bright_black(),
     );
     println!(
         "  {}  {}    {}  {}    {}  {}",
         "engine:".bright_black(),
-        "XDP + TC + Tracepoint".cyan(),
+        "XDP + TC; optional LSM / Tracepoint".cyan(),
         "signatures:".bright_black(),
         format!("{}", sig_count).bright_white().bold(),
         "families:".bright_black(),
@@ -179,7 +179,7 @@ pub fn print_attached(iface: &str, mode: &str, bpf_path: &std::path::Path) {
     println!(
         "  {}  {}",
         "◉".bright_black(),
-        "Kernel datapath active — all ingress under surveillance.".bright_black()
+        "XDP active on the selected interface.".bright_black()
     );
     println!();
     println!(
@@ -215,7 +215,7 @@ fn print_block_deployed(target: &str) {
     println!(
         "  {}  {}",
         "   └─".bright_black(),
-        "all matching packets dropped at the driver edge".bright_black(),
+        "matching IPv4 packets subject to XDP and TC filtering".bright_black(),
     );
     println!();
 }
@@ -231,7 +231,7 @@ fn print_unblock(target: &str) {
     println!(
         "  {}  {}",
         "   └─".bright_black(),
-        "rule rescinded; traffic flows unimpeded".bright_black(),
+        "packet block removed".bright_black(),
     );
     println!();
 }
@@ -325,7 +325,7 @@ pub fn run_stdin_loop(ctx: CliCtx) -> Result<()> {
                 println!(
                     "\n  {}  {}\n",
                     "◉".green().bold(),
-                    "Detaching all hooks. Hakam going dark.".green()
+                    "Shutting down and releasing kernel hooks.".green()
                 );
                 break;
             }
@@ -629,7 +629,7 @@ fn cmd_stats(ctx: &CliCtx) {
     println!("    {:<22} {}", "drop latency p99".bright_black(), format!("{} ns", p99).cyan());
     let benign_passed = stats.total_http_seen.saturating_sub(stats.total_detections);
     println!("    {:<22} {}", "HTTP seen".bright_black(), stats.total_http_seen.to_string().cyan());
-    println!("    {:<22} {}", "benign passed".bright_black(), benign_passed.to_string().bright_green().bold());
+    println!("    {:<22} {}", "HTTP without match".bright_black(), benign_passed.to_string().bright_green().bold());
     println!("    {:<22} {}", "DPI detections".bright_black(), stats.total_detections.to_string().bright_yellow().bold());
     println!("    {:<22} {}", "reassembly flows".bright_black(), stats.reassembly_flows.to_string().cyan());
     println!("    {:<22} {}", "retransmits dropped".bright_black(), stats.retransmit_dropped.to_string().cyan());

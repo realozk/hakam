@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# demo-cycle.sh — narrated end-to-end auto-test cycle for the Hakam HUD.
+# demo-cycle.sh — narrated end-to-end auto-test cycle for the Hakam CLI.
 #
 # Continuous benign HTTP traffic runs in the background for the whole cycle
 # (started once at entry, killed on Ctrl-C). Phases differ only in *attack
@@ -28,7 +28,7 @@
 #
 # Flags:
 #   --manual          wait for ENTER before starting each phase
-#   --start-at N      begin the first cycle at phase N (0–5)
+#   --start-at N      begin the first cycle at phase N (0–6)
 #   -h, --help        this help
 #
 # Source IPs rotate through the 18-IP demo pool created by setup-demo.sh, so
@@ -45,7 +45,7 @@ usage() {
 hakam demo-cycle — narrated 6-phase auto-test cycle
 
   --manual          wait for ENTER before starting each phase
-  --start-at N      begin the first cycle at phase N (0–5)
+  --start-at N      begin the first cycle at phase N (0–6)
   -h, --help        this help
 
 Live keypresses while running:
@@ -150,8 +150,8 @@ handle_key() {
     esac
 }
 
-# UI → script command channel. hakam-node appends single-char commands to
-# this file when the browser sends a {"type":"DEMO_CMD","action":"..."} WS
+# Telemetry-client → script command channel. hakam-node appends commands to
+# this file when a client sends a {"type":"DEMO_CMD","action":"..."} WS
 # message. We drain + truncate it on every poll tick so commands fire in the
 # same path as terminal keypresses.
 CMD_FILE="/tmp/hakam-demo.cmd"
@@ -180,7 +180,7 @@ poll_cmd_file() {
 poll_keys() {
     local total="$1"
     if [[ $INTERACTIVE -eq 0 ]]; then
-        # Even in non-interactive mode (e.g. nohup), still honour UI commands.
+        # Even in non-interactive mode (e.g. nohup), still honour external demo commands.
         local end_ns
         end_ns=$(( $(date +%s%N) + $(awk -v t="$total" 'BEGIN { printf "%d", t * 1000000000 }') ))
         while [[ $(date +%s%N) -lt $end_ns ]]; do
@@ -203,7 +203,7 @@ poll_keys() {
         if read -t 0.1 -n 1 -s k 2>/dev/null; then
             handle_key "$k"
         fi
-        # UI → script commands arrive via the file channel; check every tick.
+        # Client → script commands arrive via the file channel; check every tick.
         poll_cmd_file
         # Pause is sticky — stay here until the user resumes or quits.
         while [[ $PAUSED -eq 1 ]]; do
@@ -267,7 +267,7 @@ fire_random() {
 
 # Persistent benign background generator. Started once at cycle entry and
 # killed at cycle exit (or Ctrl-C). Keeps a steady stream of legitimate
-# traffic flowing through the HUD for the entire cycle so attacks land *on
+# traffic flowing through the demo for the entire cycle so attacks land *on
 # top of* real traffic — the way operators actually see them.
 BENIGN_BG_PID=""
 start_benign_background() {
@@ -358,7 +358,7 @@ phase_5_containment() {
     phase_banner "5" "CONTAINMENT" \
         "attacker rate collapses — sources auto-blocked, rate decays" \
         "30" "$YLW"
-    # 3 final stragglers, then quiet. The HUD's threat-level decay shows here.
+    # 3 final stragglers, then quiet; observe detections and drop counters.
     fire_one "SQLi"
     if ! poll_keys 10 ; then return; fi
     fire_one "Recon"
@@ -405,7 +405,7 @@ run_phase() {
 intro_banner() {
     echo
     echo "  ${BRED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
-    echo "  ${BRED}  HAKAM DEMO CYCLE${RST}    ${DIM}narrated auto-test for the HUD${RST}"
+    echo "  ${BRED}  HAKAM DEMO CYCLE${RST}    ${DIM}narrated traffic cycle for the CLI${RST}"
     echo "  ${BRED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RST}"
     echo "  ${DIM}target ${TARGET}:${PORT}  ·  source pool $(build_source_pool | wc -l | tr -d ' ') IPs${RST}"
     if [[ $INTERACTIVE -eq 1 ]]; then

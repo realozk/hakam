@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Hakam (core only — no UI) and install it as a systemd service.
+# Build Hakam and install it as a systemd service.
 #
 #   ./packaging/install.sh
 #
@@ -54,5 +54,4 @@ echo "    sudo nano $ENV_DST        # set HAKAM_IFACE to your NIC (ip -br link)"
 echo "    sudo systemctl enable --now hakam"
 echo "    journalctl -u hakam -f"
 echo
-echo "  Optional UI (not required — the core logs everything): point hakam-ui at"
-echo "  ws://<this-host>:8080/ws. See README."
+echo "  Optional telemetry: websocat ws://127.0.0.1:8080/ws"
